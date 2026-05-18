@@ -1,0 +1,46 @@
+{
+  "name": "stelar-time-real",
+  "version": "2.0.3",
+  "description": "WebSocket liviano y rápido sin dependendas en TypeScript. Alternativa a socket.io, namespaces, ACKs y archivos binarios.",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "websocket",
+    "real-time",
+    "socket",
+    " realtime",
+    "stelar",
+    "chat",
+    "webserver"
+  ],
+  "author": "Stelar",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stelar-time-real/stelar-time-real"
+  },
+  "bugs": {
+    "url": "https://github.com/stelar-time-real/stelar-time-real/issues"
+  },
+  "homepage": "https://github.com/stelar-time-real/stelar-time-real#readme",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./client.js": "./src/client.js"
+  },
+  "files": [
+    "src"
+  ],
+  "dependencies": {
+    "ws": "^8.14.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.3.0"
+  }
+}
