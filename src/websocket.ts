@@ -1,8 +1,5 @@
 /**
- * @stelar-time-real WebSocket Protocol (RFC 6455)
- *
- * Hand-crafted implementation with no external dependencies.
- * Uses Node.js built-in crypto for handshake and frame masking.
+ * @stelar-time-real WebSocket (RFC 6455)
  */
 
 import { createHash, randomBytes } from 'crypto';
@@ -10,307 +7,109 @@ import { createHash, randomBytes } from 'crypto';
 const WS_MAGIC = '258EAFA5-E914-47DA-95CA-5AB5A7E3A741';
 export const DEFAULT_MAX_WS_FRAME_SIZE = 10 * 1024 * 1024;
 
-export const OP_CONTINUATION = 0x0;
-export const OP_TEXT   = 0x1;
-export const OP_BINARY = 0x2;
-export const OP_CLOSE  = 0x8;
-export const OP_PING   = 0x9;
-export const OP_PONG   = 0xA;
+export const OP_CONTINUATION = 0x0, OP_TEXT = 0x1, OP_BINARY = 0x2,
+  OP_CLOSE = 0x8, OP_PING = 0x9, OP_PONG = 0xA;
 
-export const CLOSE_NORMAL = 1000;
-export const CLOSE_GOING_AWAY = 1001;
-export const CLOSE_PROTOCOL_ERROR = 1002;
-export const CLOSE_UNSUPPORTED = 1003;
-export const CLOSE_INVALID_PAYLOAD = 1007;
-export const CLOSE_POLICY_VIOLATION = 1008;
-export const CLOSE_MESSAGE_TOO_BIG = 1009;
-export const CLOSE_INTERNAL_ERROR = 1011;
+export const CLOSE_NORMAL = 1000, CLOSE_GOING_AWAY = 1001, CLOSE_PROTOCOL_ERROR = 1002,
+  CLOSE_UNSUPPORTED = 1003, CLOSE_INVALID_PAYLOAD = 1007, CLOSE_POLICY_VIOLATION = 1008,
+  CLOSE_MESSAGE_TOO_BIG = 1009, CLOSE_INTERNAL_ERROR = 1011;
 
 export class WebSocketError extends Error {
-  public code: number;
-  constructor(message: string, code = CLOSE_INTERNAL_ERROR) {
-    super(message);
-    this.name = 'WebSocketError';
-    this.code = code;
-  }
+  code: number;
+  constructor(message: string, code = CLOSE_INTERNAL_ERROR) { super(message); this.name = 'WebSocketError'; this.code = code; }
 }
 
-/** Compute Sec-WebSocket-Accept from client key per RFC 6455 Section 4.2.2 */
-export function computeAcceptKey(key: string): string {
-  return createHash('sha1').update(key + WS_MAGIC).digest('base64');
-}
-
-export function generateWSKey(): string {
-  return randomBytes(16).toString('base64');
-}
+export const computeAcceptKey = (key: string) => createHash('sha1').update(key + WS_MAGIC).digest('base64');
+export const generateWSKey = () => randomBytes(16).toString('base64');
+export const validateWSKey = (key: string): boolean => typeof key === 'string' && Buffer.from(key, 'base64').length === 16;
 
 export function buildUpgradeResponse(key: string, headers?: Record<string, string>): string {
-  const accept = computeAcceptKey(key);
-  const lines = [
-    'HTTP/1.1 101 Switching Protocols',
-    'Upgrade: websocket',
-    'Connection: Upgrade',
-    `Sec-WebSocket-Accept: ${accept}`,
-  ];
-  if (headers) {
-    for (const [k, v] of Object.entries(headers)) {
-      lines.push(`${k}: ${v}`);
-    }
-  }
+  const lines = ['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'Connection: Upgrade', `Sec-WebSocket-Accept: ${computeAcceptKey(key)}`];
+  if (headers) for (const [k, v] of Object.entries(headers)) lines.push(`${k}: ${v}`);
   lines.push('', '');
   return lines.join('\r\n');
 }
 
-/** Validate Sec-WebSocket-Key: must be 16 bytes base64 encoded */
-export function validateWSKey(key: string): boolean {
-  if (typeof key !== 'string') return false;
-  const decoded = Buffer.from(key, 'base64');
-  return decoded.length === 16;
-}
+export interface WSFrame { fin: boolean; opcode: number; payload: Buffer; masked: boolean; }
 
-export interface WSFrame {
-  fin: boolean;
-  opcode: number;
-  payload: Buffer;
-  masked: boolean;
-}
-
-/** Parse a single WebSocket frame from buffer. Returns null if incomplete. */
-export function parseWSFrame(buf: Buffer, maxFrameSize = DEFAULT_MAX_WS_FRAME_SIZE): {
-  frame: WSFrame;
-  consumed: number;
-} | null {
+export function parseWSFrame(buf: Buffer, max = DEFAULT_MAX_WS_FRAME_SIZE): { frame: WSFrame; consumed: number } | null {
   if (buf.length < 2) return null;
-
-  const firstByte  = buf[0];
-  const secondByte = buf[1];
-
-  const fin    = (firstByte & 0x80) !== 0;
-  const rsv1   = (firstByte & 0x40) !== 0;
-  const rsv2   = (firstByte & 0x20) !== 0;
-  const rsv3   = (firstByte & 0x10) !== 0;
-  const opcode = firstByte & 0x0F;
-  const masked = (secondByte & 0x80) !== 0;
-  let payloadLen = secondByte & 0x7F;
-
-  if (rsv1 || rsv2 || rsv3) {
-    throw new WebSocketError('RSV bits set without extension negotiation', CLOSE_PROTOCOL_ERROR);
-  }
-
-  let offset = 2;
-
-  if (payloadLen === 126) {
-    if (buf.length < 4) return null;
-    payloadLen = buf.readUInt16BE(2);
-    offset = 4;
-  } else if (payloadLen === 127) {
-    if (buf.length < 10) return null;
-    const high = buf.readUInt32BE(2);
-    const low  = buf.readUInt32BE(6);
-    payloadLen = high * 0x100000000 + low;
-    if (payloadLen > Number.MAX_SAFE_INTEGER) {
-      throw new WebSocketError('Frame payload too large for JavaScript', CLOSE_MESSAGE_TOO_BIG);
-    }
-    offset = 10;
-  }
-
-  if (payloadLen > maxFrameSize) {
-    throw new WebSocketError(
-      `Frame payload exceeds max size (${maxFrameSize} bytes)`,
-      CLOSE_MESSAGE_TOO_BIG
-    );
-  }
-
-  let maskKey: Buffer | undefined;
-  if (masked) {
-    if (buf.length < offset + 4) return null;
-    maskKey = buf.subarray(offset, offset + 4);
-    offset += 4;
-  }
-
-  if (buf.length < offset + payloadLen) return null;
-
-  let payload = Buffer.from(buf.subarray(offset, offset + payloadLen));
-  if (masked && maskKey) {
-    for (let i = 0; i < payloadLen; i++) {
-      payload[i] ^= maskKey[i & 3];
-    }
-  }
-
-  return {
-    frame: { fin, opcode, payload, masked },
-    consumed: offset + payloadLen,
-  };
+  const b0 = buf[0], b1 = buf[1];
+  const fin = !!(b0 & 0x80), rsv = b0 & 0x70, opcode = b0 & 0x0F, masked = !!(b1 & 0x80);
+  let len = b1 & 0x7F, off = 2;
+  if (rsv) throw new WebSocketError('RSV bits set', CLOSE_PROTOCOL_ERROR);
+  if (len === 126) { if (buf.length < 4) return null; len = buf.readUInt16BE(2); off = 4; }
+  else if (len === 127) { if (buf.length < 10) return null; len = buf.readUInt32BE(2) * 0x100000000 + buf.readUInt32BE(6); off = 10; }
+  if (len > max) throw new WebSocketError(`Frame exceeds max (${max})`, CLOSE_MESSAGE_TOO_BIG);
+  let mk: Buffer | undefined;
+  if (masked) { if (buf.length < off + 4) return null; mk = buf.subarray(off, off + 4); off += 4; }
+  if (buf.length < off + len) return null;
+  const payload = Buffer.from(buf.subarray(off, off + len));
+  if (masked && mk) for (let i = 0; i < len; i++) payload[i] ^= mk[i & 3];
+  return { frame: { fin, opcode, payload, masked }, consumed: off + len };
 }
 
-/** Create an unmasked WS frame (server-to-client per RFC 6455 Section 5.3) */
-export function createWSFrame(opcode: number, payload: Buffer | string): Buffer {
-  const data = typeof payload === 'string' ? Buffer.from(payload, 'utf8') : payload;
-
-  let header: Buffer;
-
-  if (data.length < 126) {
-    header = Buffer.alloc(2);
-    header[0] = 0x80 | opcode;
-    header[1] = data.length;
-  } else if (data.length < 65536) {
-    header = Buffer.alloc(4);
-    header[0] = 0x80 | opcode;
-    header[1] = 126;
-    header.writeUInt16BE(data.length, 2);
+export function createWSFrame(opcode: number, payload: Buffer | string, masked = false): Buffer {
+  const d = typeof payload === 'string' ? Buffer.from(payload, 'utf8') : payload;
+  const mk = masked ? randomBytes(4) : undefined;
+  const base = masked ? 0x80 : 0;
+  let h: Buffer;
+  if (d.length < 126) {
+    h = Buffer.alloc(masked ? 6 : 2); h[0] = 0x80 | opcode; h[1] = base | d.length;
+    if (mk) mk.copy(h, 2);
+  } else if (d.length < 65536) {
+    h = Buffer.alloc(masked ? 8 : 4); h[0] = 0x80 | opcode; h[1] = base | 126;
+    h.writeUInt16BE(d.length, 2); if (mk) mk.copy(h, 4);
   } else {
-    header = Buffer.alloc(10);
-    header[0] = 0x80 | opcode;
-    header[1] = 127;
-    header.writeUInt32BE(Math.floor(data.length / 0x100000000), 2);
-    header.writeUInt32BE(data.length & 0xFFFFFFFF, 6);
+    h = Buffer.alloc(masked ? 14 : 10); h[0] = 0x80 | opcode; h[1] = base | 127;
+    h.writeUInt32BE(Math.floor(d.length / 0x100000000), 2);
+    h.writeUInt32BE(d.length & 0xFFFFFFFF, 6); if (mk) mk.copy(h, 10);
   }
-
-  return Buffer.concat([header, data]);
+  if (mk) for (let i = 0; i < d.length; i++) d[i] ^= mk[i & 3];
+  return Buffer.concat([h, d]);
 }
 
-/** Create a masked WS frame (client-to-server per RFC 6455 Section 5.3) */
-export function createWSFrameMasked(opcode: number, payload: Buffer | string): Buffer {
-  const data = typeof payload === 'string' ? Buffer.from(payload, 'utf8') : payload;
-  const maskKey = randomBytes(4);
+/* Server (unmasked) */
+export const createWSTextFrame = (msg: string) => createWSFrame(OP_TEXT, msg);
+export const createWSBinaryFrame = (data: Buffer) => createWSFrame(OP_BINARY, data);
+export const createWSCloseFrame = (code = CLOSE_NORMAL, reason = '') => {
+  const b = Buffer.alloc(2 + Buffer.byteLength(reason)); b.writeUInt16BE(code, 0); if (reason) b.write(reason, 2, 'utf8'); return createWSFrame(OP_CLOSE, b);
+};
+export const createWSPingFrame = (data?: Buffer) => createWSFrame(OP_PING, data || Buffer.alloc(0));
+export const createWSPongFrame = (data?: Buffer) => createWSFrame(OP_PONG, data || Buffer.alloc(0));
 
-  let header: Buffer;
+/* Client (masked) */
+export const createWSTextFrameMasked = (msg: string) => createWSFrame(OP_TEXT, msg, true);
+export const createWSBinaryFrameMasked = (data: Buffer) => createWSFrame(OP_BINARY, data, true);
+export const createWSCloseFrameMasked = (code = CLOSE_NORMAL, reason = '') => {
+  const b = Buffer.alloc(2 + Buffer.byteLength(reason)); b.writeUInt16BE(code, 0); if (reason) b.write(reason, 2, 'utf8'); return createWSFrame(OP_CLOSE, b, true);
+};
+export const createWSPingFrameMasked = () => createWSFrame(OP_PING, Buffer.alloc(0), true);
+export const createWSPongFrameMasked = () => createWSFrame(OP_PONG, Buffer.alloc(0), true);
 
-  if (data.length < 126) {
-    header = Buffer.alloc(6);
-    header[0] = 0x80 | opcode;
-    header[1] = 0x80 | data.length;
-    maskKey.copy(header, 2);
-  } else if (data.length < 65536) {
-    header = Buffer.alloc(8);
-    header[0] = 0x80 | opcode;
-    header[1] = 0x80 | 126;
-    header.writeUInt16BE(data.length, 2);
-    maskKey.copy(header, 4);
-  } else {
-    header = Buffer.alloc(14);
-    header[0] = 0x80 | opcode;
-    header[1] = 0x80 | 127;
-    header.writeUInt32BE(Math.floor(data.length / 0x100000000), 2);
-    header.writeUInt32BE(data.length & 0xFFFFFFFF, 6);
-    maskKey.copy(header, 10);
-  }
-
-  const outData = Buffer.from(data);
-  for (let i = 0; i < outData.length; i++) {
-    outData[i] ^= maskKey[i & 3];
-  }
-
-  return Buffer.concat([header, outData]);
-}
-
-/* Server-to-client frame helpers (unmasked) */
-
-export function createWSTextFrame(message: string): Buffer {
-  return createWSFrame(OP_TEXT, message);
-}
-
-export function createWSBinaryFrame(data: Buffer): Buffer {
-  return createWSFrame(OP_BINARY, data);
-}
-
-export function createWSCloseFrame(code = CLOSE_NORMAL, reason = ''): Buffer {
-  const buf = Buffer.alloc(2 + Buffer.byteLength(reason));
-  buf.writeUInt16BE(code, 0);
-  if (reason.length > 0) buf.write(reason, 2, 'utf8');
-  return createWSFrame(OP_CLOSE, buf);
-}
-
-export function createWSPingFrame(data?: Buffer): Buffer {
-  return createWSFrame(OP_PING, data || Buffer.alloc(0));
-}
-
-export function createWSPongFrame(data?: Buffer): Buffer {
-  return createWSFrame(OP_PONG, data || Buffer.alloc(0));
-}
-
-/* Client-to-server frame helpers (masked) */
-
-export function createWSTextFrameMasked(message: string): Buffer {
-  return createWSFrameMasked(OP_TEXT, message);
-}
-
-export function createWSBinaryFrameMasked(data: Buffer): Buffer {
-  return createWSFrameMasked(OP_BINARY, data);
-}
-
-export function createWSCloseFrameMasked(code = CLOSE_NORMAL, reason = ''): Buffer {
-  const buf = Buffer.alloc(2 + Buffer.byteLength(reason));
-  buf.writeUInt16BE(code, 0);
-  if (reason.length > 0) buf.write(reason, 2, 'utf8');
-  return createWSFrameMasked(OP_CLOSE, buf);
-}
-
-export function createWSPingFrameMasked(): Buffer {
-  return createWSFrameMasked(OP_PING, Buffer.alloc(0));
-}
-
-export function createWSPongFrameMasked(): Buffer {
-  return createWSFrameMasked(OP_PONG, Buffer.alloc(0));
-}
-
-/** Streaming parser for WebSocket frames. Buffers partial data and emits complete frames. */
 export class WSFrameParser {
-  private buf: Buffer = Buffer.alloc(0);
-  private maxFrameSize: number;
-  private totalBytesReceived = 0;
+  private buf = Buffer.alloc(0);
+  private max: number;
+  private received = 0;
 
-  constructor(maxFrameSize = DEFAULT_MAX_WS_FRAME_SIZE) {
-    this.maxFrameSize = maxFrameSize;
-  }
+  constructor(max = DEFAULT_MAX_WS_FRAME_SIZE) { this.max = max; }
 
   feed(data: Buffer): WSFrame[] {
-    this.totalBytesReceived += data.length;
+    this.received += data.length;
     this.buf = Buffer.concat([this.buf, data]);
-
-    if (this.buf.length > this.maxFrameSize * 2) {
-      this.buf = Buffer.alloc(0);
-      throw new WebSocketError(
-        `Input buffer exceeded limit`,
-        CLOSE_POLICY_VIOLATION
-      );
-    }
-
+    if (this.buf.length > this.max * 2) { this.buf = Buffer.alloc(0); throw new WebSocketError('Buffer overflow', CLOSE_POLICY_VIOLATION); }
     const frames: WSFrame[] = [];
-
     while (this.buf.length > 0) {
       try {
-        const result = parseWSFrame(this.buf, this.maxFrameSize);
-        if (!result) break;
-
-        const { frame, consumed } = result;
-
-        if (frame.opcode === OP_CONTINUATION) {
-          this.buf = consumed < this.buf.length
-            ? Buffer.from(this.buf.subarray(consumed))
-            : Buffer.alloc(0);
-          continue;
-        }
-
-        frames.push(frame);
-        this.buf = consumed < this.buf.length
-          ? Buffer.from(this.buf.subarray(consumed))
-          : Buffer.alloc(0);
-      } catch (err) {
-        this.buf = Buffer.alloc(0);
-        throw err;
-      }
+        const r = parseWSFrame(this.buf, this.max);
+        if (!r) break;
+        this.buf = r.consumed < this.buf.length ? Buffer.from(this.buf.subarray(r.consumed)) : Buffer.alloc(0);
+        if (r.frame.opcode !== OP_CONTINUATION) frames.push(r.frame);
+      } catch (e) { this.buf = Buffer.alloc(0); throw e; }
     }
-
     return frames;
   }
 
-  reset(): void {
-    this.buf = Buffer.alloc(0);
-    this.totalBytesReceived = 0;
-  }
-
-  getBytesReceived(): number {
-    return this.totalBytesReceived;
-  }
+  reset() { this.buf = Buffer.alloc(0); this.received = 0; }
+  getBytesReceived() { return this.received; }
 }

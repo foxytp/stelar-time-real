@@ -1,6 +1,6 @@
 {
   "name": "stelar-time-real",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "Zero-dependency production real-time library. Custom binary TCP + manual WebSocket. No ws package. Rate limiting (custom/per-event/per-client), hooks, custom IP tracker, custom health check, runtime config, rooms, ACKs, middleware, TLS/SSL.",
   "main": "./src/index.js",
   "types": "./src/index.d.ts",

@@ -1,38 +1,21 @@
 /**
  * @stelar-time-real Binary Protocol
- *
- * Frame format:
- * [4B totalLen BE][1B type][2B eventLen BE][eventLen bytes event][payload]
- *
- * Min frame: 7 bytes (header only). Max event name: 256 bytes.
+ * Frame: [4B totalLen BE][1B type][2B eventLen BE][event][payload]
  */
 
-export const FRAME_JSON       = 0x01;
-export const FRAME_BINARY     = 0x02;
-export const FRAME_PING       = 0x03;
-export const FRAME_PONG       = 0x04;
-export const FRAME_ACK_REQ    = 0x05;
-export const FRAME_ACK_RES    = 0x06;
-export const FRAME_CONNECT    = 0x07;
-export const FRAME_DISCONNECT = 0x08;
-export const FRAME_JOIN       = 0x09;
-export const FRAME_LEAVE      = 0x0A;
-export const FRAME_ERROR      = 0x0B;
+export const FRAME_JSON = 0x01, FRAME_BINARY = 0x02, FRAME_PING = 0x03,
+  FRAME_PONG = 0x04, FRAME_ACK_REQ = 0x05, FRAME_ACK_RES = 0x06,
+  FRAME_CONNECT = 0x07, FRAME_DISCONNECT = 0x08, FRAME_JOIN = 0x09,
+  FRAME_LEAVE = 0x0A, FRAME_ERROR = 0x0B;
 
-/** Max event name length in bytes */
 export const MAX_EVENT_LENGTH = 256;
-/** Default max frame size: 10 MB */
 export const DEFAULT_MAX_FRAME_SIZE = 10 * 1024 * 1024;
 export const HEADER_SIZE = 7;
 
-export interface ParsedFrame {
-  type: number;
-  event: string;
-  payload: Buffer;
-}
+export interface ParsedFrame { type: number; event: string; payload: Buffer; }
 
 export class ProtocolError extends Error {
-  public code: string;
+  code: string;
   constructor(message: string, code = 'PROTOCOL_ERROR') {
     super(message);
     this.name = 'ProtocolError';
@@ -40,198 +23,93 @@ export class ProtocolError extends Error {
   }
 }
 
-/** Validates event name format. Throws ProtocolError on invalid input. */
 export function validateEventName(event: string): void {
-  if (typeof event !== 'string') {
-    throw new ProtocolError('Event name must be a string', 'INVALID_EVENT');
-  }
-  if (event.length === 0) {
-    throw new ProtocolError('Event name cannot be empty', 'EMPTY_EVENT');
-  }
-  if (event.length > MAX_EVENT_LENGTH) {
-    throw new ProtocolError(`Event name exceeds ${MAX_EVENT_LENGTH} bytes`, 'EVENT_TOO_LONG');
-  }
-  if (!/^[\w\-./:]+$/.test(event)) {
-    throw new ProtocolError('Event name contains invalid characters', 'INVALID_EVENT_CHARS');
-  }
-  if (['ping', 'pong', 'connect', 'disconnect', 'error'].includes(event)) {
-    throw new ProtocolError(`Event "${event}" is reserved`, 'RESERVED_EVENT');
-  }
+  if (typeof event !== 'string') throw new ProtocolError('Event name must be a string', 'INVALID_EVENT');
+  if (!event) throw new ProtocolError('Event name cannot be empty', 'EMPTY_EVENT');
+  if (event.length > MAX_EVENT_LENGTH) throw new ProtocolError(`Event name exceeds ${MAX_EVENT_LENGTH} bytes`, 'EVENT_TOO_LONG');
+  if (!/^[a-zA-Z0-9\-./:]+$/.test(event)) throw new ProtocolError('Event name contains invalid characters', 'INVALID_EVENT_CHARS');
+  if (['ping', 'pong', 'connect', 'disconnect', 'error'].includes(event)) throw new ProtocolError(`Event "${event}" is reserved`, 'RESERVED_EVENT');
 }
 
-function validatePayloadSize(payload: Buffer, maxSize: number): void {
-  if (payload.length > maxSize) {
-    throw new ProtocolError(`Payload exceeds max size (${maxSize} bytes)`, 'PAYLOAD_TOO_LARGE');
-  }
-}
-
-function encodeFrame(type: number, event: string, payload: Buffer, maxFrameSize = DEFAULT_MAX_FRAME_SIZE): Buffer {
-  if (event.length > MAX_EVENT_LENGTH) {
-    throw new ProtocolError(`Event name exceeds ${MAX_EVENT_LENGTH} bytes`, 'EVENT_TOO_LONG');
-  }
-
-  const eventBuf = Buffer.from(event, 'utf8');
-  const totalLen = HEADER_SIZE + eventBuf.length + payload.length;
-
-  if (totalLen > maxFrameSize) {
-    throw new ProtocolError(`Frame exceeds max size (${maxFrameSize} bytes)`, 'FRAME_TOO_LARGE');
-  }
-
-  const frame = Buffer.alloc(totalLen);
-  frame.writeUInt32BE(totalLen, 0);
-  frame[4] = type;
-  frame.writeUInt16BE(eventBuf.length, 5);
-  if (eventBuf.length > 0) eventBuf.copy(frame, HEADER_SIZE);
-  if (payload.length > 0) payload.copy(frame, HEADER_SIZE + eventBuf.length);
-  return frame;
-}
-
-export function encodeJsonFrame(event: string, data: unknown, maxFrameSize?: number): Buffer {
-  validateEventName(event);
-  const payload = Buffer.from(JSON.stringify(data), 'utf8');
-  if (maxFrameSize) validatePayloadSize(payload, maxFrameSize);
-  return encodeFrame(FRAME_JSON, event, payload, maxFrameSize);
-}
-
-export function encodeBinaryFrame(event: string, data: Uint8Array | Buffer, maxFrameSize?: number): Buffer {
-  validateEventName(event);
-  const payload = Buffer.from(data);
-  if (maxFrameSize) validatePayloadSize(payload, maxFrameSize);
-  return encodeFrame(FRAME_BINARY, event, payload, maxFrameSize);
-}
-
-export function encodePingFrame(): Buffer {
-  const f = Buffer.alloc(HEADER_SIZE);
-  f.writeUInt32BE(HEADER_SIZE, 0);
-  f[4] = FRAME_PING;
-  f.writeUInt16BE(0, 5);
+function encode(type: number, event: string, payload: Buffer, max = DEFAULT_MAX_FRAME_SIZE): Buffer {
+  const eb = Buffer.from(event, 'utf8');
+  if (eb.length > MAX_EVENT_LENGTH) throw new ProtocolError(`Event name exceeds ${MAX_EVENT_LENGTH} bytes`, 'EVENT_TOO_LONG');
+  const total = HEADER_SIZE + eb.length + payload.length;
+  if (total > max) throw new ProtocolError(`Frame exceeds max size (${max} bytes)`, 'FRAME_TOO_LARGE');
+  const f = Buffer.alloc(total);
+  f.writeUInt32BE(total, 0);
+  f[4] = type;
+  f.writeUInt16BE(eb.length, 5);
+  if (eb.length) eb.copy(f, HEADER_SIZE);
+  if (payload.length) payload.copy(f, HEADER_SIZE + eb.length);
   return f;
 }
 
-export function encodePongFrame(): Buffer {
+const emptyFrame = (type: number): Buffer => {
   const f = Buffer.alloc(HEADER_SIZE);
   f.writeUInt32BE(HEADER_SIZE, 0);
-  f[4] = FRAME_PONG;
+  f[4] = type;
   f.writeUInt16BE(0, 5);
   return f;
-}
+};
 
-export function encodeAckReqFrame(ackName: string, data: unknown, maxFrameSize?: number): Buffer {
-  const payload = Buffer.from(JSON.stringify(data), 'utf8');
-  if (maxFrameSize) validatePayloadSize(payload, maxFrameSize);
-  return encodeFrame(FRAME_ACK_REQ, ackName, payload, maxFrameSize);
-}
+export const encodeJsonFrame = (event: string, data: unknown, max?: number) =>
+  (validateEventName(event), encode(FRAME_JSON, event, Buffer.from(JSON.stringify(data), 'utf8'), max));
 
-export function encodeAckResFrame(ackName: string, data: unknown, maxFrameSize?: number): Buffer {
-  const payload = Buffer.from(JSON.stringify(data), 'utf8');
-  if (maxFrameSize) validatePayloadSize(payload, maxFrameSize);
-  return encodeFrame(FRAME_ACK_RES, ackName, payload, maxFrameSize);
-}
+export const encodeBinaryFrame = (event: string, data: Uint8Array | Buffer, max?: number) =>
+  (validateEventName(event), encode(FRAME_BINARY, event, Buffer.from(data), max));
 
-export function encodeConnectFrame(clientId: string): Buffer {
-  return encodeFrame(FRAME_CONNECT, 'connect', Buffer.from(clientId, 'utf8'));
-}
+export const encodePingFrame = () => emptyFrame(FRAME_PING);
+export const encodePongFrame = () => emptyFrame(FRAME_PONG);
+export const encodeAckReqFrame = (name: string, data: unknown, max?: number) =>
+  encode(FRAME_ACK_REQ, name, Buffer.from(JSON.stringify(data), 'utf8'), max);
 
-export function encodeDisconnectFrame(): Buffer {
-  const f = Buffer.alloc(HEADER_SIZE);
-  f.writeUInt32BE(HEADER_SIZE, 0);
-  f[4] = FRAME_DISCONNECT;
-  f.writeUInt16BE(0, 5);
-  return f;
-}
+export const encodeAckResFrame = (name: string, data: unknown, max?: number) =>
+  encode(FRAME_ACK_RES, name, Buffer.from(JSON.stringify(data), 'utf8'), max);
 
-export function encodeJoinFrame(room: string, maxFrameSize?: number): Buffer {
-  const payload = Buffer.from(room, 'utf8');
-  return encodeFrame(FRAME_JOIN, 'join-room', payload, maxFrameSize);
-}
+export const encodeConnectFrame = (id: string) => encode(FRAME_CONNECT, 'connect', Buffer.from(id, 'utf8'));
+export const encodeDisconnectFrame = () => emptyFrame(FRAME_DISCONNECT);
+export const encodeJoinFrame = (room: string, max?: number) => encode(FRAME_JOIN, 'join-room', Buffer.from(room, 'utf8'), max);
+export const encodeLeaveFrame = (room: string) => encode(FRAME_LEAVE, 'leave-room', room ? Buffer.from(room, 'utf8') : Buffer.alloc(0));
+export const encodeErrorFrame = (msg: string) => encode(FRAME_ERROR, 'error', Buffer.from(msg, 'utf8'));
 
-export function encodeLeaveFrame(room: string): Buffer {
-  const payload = room ? Buffer.from(room, 'utf8') : Buffer.alloc(0);
-  return encodeFrame(FRAME_LEAVE, 'leave-room', payload);
-}
-
-export function encodeErrorFrame(message: string): Buffer {
-  return encodeFrame(FRAME_ERROR, 'error', Buffer.from(message, 'utf8'));
-}
-
-/** Streaming frame parser for TCP connections. Buffers partial data and emits complete frames. */
 export class FrameParser {
-  private buf: Buffer = Buffer.alloc(0);
-  private maxFrameSize: number;
-  private totalBytesReceived = 0;
+  private buf = Buffer.alloc(0);
+  private max: number;
+  private received = 0;
 
-  constructor(maxFrameSize = DEFAULT_MAX_FRAME_SIZE) {
-    this.maxFrameSize = maxFrameSize;
-  }
+  constructor(max = DEFAULT_MAX_FRAME_SIZE) { this.max = max; }
 
   feed(data: Buffer): ParsedFrame[] {
-    this.totalBytesReceived += data.length;
+    this.received += data.length;
     this.buf = Buffer.concat([this.buf, data]);
-
-    if (this.buf.length > this.maxFrameSize * 2) {
+    if (this.buf.length > this.max * 2) {
       this.buf = Buffer.alloc(0);
-      throw new ProtocolError(
-        `Input buffer exceeded limit (${this.maxFrameSize * 2} bytes)`,
-        'BUFFER_OVERFLOW'
-      );
+      throw new ProtocolError(`Buffer overflow (${this.max * 2})`, 'BUFFER_OVERFLOW');
     }
-
     const frames: ParsedFrame[] = [];
-
     while (this.buf.length >= HEADER_SIZE) {
-      const totalLen = this.buf.readUInt32BE(0);
-
-      if (totalLen < HEADER_SIZE) {
+      const total = this.buf.readUInt32BE(0);
+      if (total < HEADER_SIZE || total > this.max) {
         this.buf = Buffer.alloc(0);
-        throw new ProtocolError(`Invalid frame size: ${totalLen}`, 'INVALID_FRAME_SIZE');
+        throw new ProtocolError(`Invalid frame size: ${total}`, total < HEADER_SIZE ? 'INVALID_FRAME_SIZE' : 'FRAME_TOO_LARGE');
       }
-
-      if (totalLen > this.maxFrameSize) {
+      if (this.buf.length < total) break;
+      const el = this.buf.readUInt16BE(5);
+      if (HEADER_SIZE + el > total || el > MAX_EVENT_LENGTH) {
         this.buf = Buffer.alloc(0);
-        throw new ProtocolError(
-          `Frame exceeds max size (${this.maxFrameSize} bytes)`,
-          'FRAME_TOO_LARGE'
-        );
+        throw new ProtocolError('Invalid event length', 'INVALID_EVENT_LENGTH');
       }
-
-      if (this.buf.length < totalLen) break;
-
-      const type = this.buf[4];
-      const eventLen = this.buf.readUInt16BE(5);
-
-      if (HEADER_SIZE + eventLen > totalLen) {
-        this.buf = Buffer.alloc(0);
-        throw new ProtocolError('Event length exceeds frame bounds', 'INVALID_EVENT_LENGTH');
-      }
-
-      if (eventLen > MAX_EVENT_LENGTH) {
-        this.buf = Buffer.alloc(0);
-        throw new ProtocolError(`Event name exceeds ${MAX_EVENT_LENGTH} bytes`, 'EVENT_TOO_LONG');
-      }
-
-      const event = eventLen > 0
-        ? this.buf.subarray(HEADER_SIZE, HEADER_SIZE + eventLen).toString('utf8')
-        : '';
-      const payloadStart = HEADER_SIZE + eventLen;
-      const payload = totalLen > payloadStart
-        ? Buffer.from(this.buf.subarray(payloadStart, totalLen))
-        : Buffer.alloc(0);
-
-      frames.push({ type, event, payload });
-      this.buf = totalLen < this.buf.length
-        ? Buffer.from(this.buf.subarray(totalLen))
-        : Buffer.alloc(0);
+      frames.push({
+        type: this.buf[4],
+        event: el ? this.buf.subarray(HEADER_SIZE, HEADER_SIZE + el).toString('utf8') : '',
+        payload: total > HEADER_SIZE + el ? Buffer.from(this.buf.subarray(HEADER_SIZE + el, total)) : Buffer.alloc(0),
+      });
+      this.buf = total < this.buf.length ? Buffer.from(this.buf.subarray(total)) : Buffer.alloc(0);
     }
-
     return frames;
   }
 
-  reset(): void {
-    this.buf = Buffer.alloc(0);
-    this.totalBytesReceived = 0;
-  }
-
-  getBytesReceived(): number {
-    return this.totalBytesReceived;
-  }
+  reset() { this.buf = Buffer.alloc(0); this.received = 0; }
+  getBytesReceived() { return this.received; }
 }

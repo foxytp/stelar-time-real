@@ -1,867 +1,625 @@
 /**
- * @stelar-time-real Server
- *
- * Dual-protocol real-time server: WebSocket (RFC 6455) + custom binary TCP.
- * Zero external dependencies — uses only Node.js built-in modules.
+ * @stelar-time-real Server — Dual-protocol: WebSocket (RFC 6455) + binary TCP
  */
-import { createServer as createHttpServer } from 'http';
-import { createServer as createTcpServer } from 'net';
+import { createServer as createHttp } from 'http';
+import { createServer as createTcp } from 'net';
 import { randomUUID } from 'crypto';
-import { createServer as createTlsServer } from 'tls';
+import { createServer as createTls } from 'tls';
 import { FrameParser, encodeJsonFrame, encodeBinaryFrame, encodePingFrame, encodePongFrame, encodeAckResFrame, encodeConnectFrame, encodeDisconnectFrame, encodeErrorFrame, FRAME_JSON, FRAME_BINARY, FRAME_PING, FRAME_PONG, FRAME_ACK_REQ, FRAME_ACK_RES, FRAME_JOIN, FRAME_LEAVE, FRAME_CONNECT, ProtocolError, DEFAULT_MAX_FRAME_SIZE, } from './protocol.js';
-import { WSFrameParser, buildUpgradeResponse, validateWSKey, createWSTextFrame, createWSBinaryFrame, createWSCloseFrame, createWSPingFrame, createWSPongFrame, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG, WebSocketError, CLOSE_POLICY_VIOLATION, CLOSE_MESSAGE_TOO_BIG, CLOSE_NORMAL, CLOSE_GOING_AWAY, DEFAULT_MAX_WS_FRAME_SIZE, } from './websocket.js';
+import { WSFrameParser, buildUpgradeResponse, validateWSKey, createWSTextFrame, createWSBinaryFrame, createWSCloseFrame, createWSPingFrame, createWSPongFrame, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG, WebSocketError, CLOSE_POLICY_VIOLATION, CLOSE_MESSAGE_TOO_BIG, CLOSE_GOING_AWAY, DEFAULT_MAX_WS_FRAME_SIZE, } from './websocket.js';
 import { Logger, NULL_LOGGER } from './logger.js';
 class RateLimiter {
-    constructor(maxPoints = 100, windowMs = 1000) {
+    constructor(maxPts = 100, winMs = 1000) {
+        this.maxPts = maxPts;
+        this.winMs = winMs;
         this.limits = new Map();
-        this.maxPoints = maxPoints;
-        this.windowMs = windowMs;
     }
     check(id, cost = 1) {
         const now = Date.now();
-        let entry = this.limits.get(id);
-        if (!entry || now >= entry.resetTime) {
-            entry = { count: 0, resetTime: now + this.windowMs };
-            this.limits.set(id, entry);
+        let e = this.limits.get(id);
+        if (!e || now >= e.resetTime) {
+            e = { count: 0, resetTime: now + this.winMs };
+            this.limits.set(id, e);
         }
-        if (entry.count + cost > this.maxPoints) {
+        if (e.count + cost > this.maxPts)
             return false;
-        }
-        entry.count += cost;
+        e.count += cost;
         return true;
     }
-    cleanup() {
-        const now = Date.now();
-        for (const [id, entry] of this.limits) {
-            if (now >= entry.resetTime) {
-                this.limits.delete(id);
-            }
-        }
-    }
-    reset(id) {
-        this.limits.delete(id);
-    }
-    size() {
-        return this.limits.size;
-    }
+    cleanup() { const now = Date.now(); for (const [id, e] of this.limits)
+        if (now >= e.resetTime)
+            this.limits.delete(id); }
+    reset(id) { this.limits.delete(id); }
+    size() { return this.limits.size; }
 }
-class IPConnectionTracker {
-    constructor(maxPerIP = 50) {
-        this.ipCounts = new Map();
-        this.maxPerIP = maxPerIP;
+class IPTracker {
+    constructor(max = 50) {
+        this.max = max;
+        this.m = new Map();
     }
-    check(ip) {
-        const current = this.ipCounts.get(ip) || 0;
-        return current < this.maxPerIP;
-    }
-    add(ip) {
-        this.ipCounts.set(ip, (this.ipCounts.get(ip) || 0) + 1);
-    }
-    remove(ip) {
-        const current = this.ipCounts.get(ip) || 0;
-        if (current <= 1) {
-            this.ipCounts.delete(ip);
-        }
-        else {
-            this.ipCounts.set(ip, current - 1);
-        }
-    }
-    getCount(ip) {
-        return this.ipCounts.get(ip) || 0;
-    }
-    cleanup() {
-        for (const [ip, count] of this.ipCounts) {
-            if (count <= 0)
-                this.ipCounts.delete(ip);
-        }
-    }
+    check(ip) { return (this.m.get(ip) || 0) < this.max; }
+    add(ip) { this.m.set(ip, (this.m.get(ip) || 0) + 1); }
+    remove(ip) { const c = this.m.get(ip) || 0; c <= 1 ? this.m.delete(ip) : this.m.set(ip, c - 1); }
+    getCount(ip) { return this.m.get(ip) || 0; }
+    cleanup() { for (const [ip, c] of this.m)
+        if (c <= 0)
+            this.m.delete(ip); }
 }
+/* ── Server ── */
 class StelarServer {
-    constructor(options = {}) {
+    constructor(o = {}) {
         this.httpServer = null;
         this.tcpServer = null;
+        this.evRateLimits = new Map();
+        this.clientRates = new Map();
         this.clients = new Map();
-        this.clientsById = new Map();
-        this.rooms = new Map(); // room -> Set of client IDs
+        this.byId = new Map();
+        this.rooms = new Map();
         this.events = new Map();
-        this.middlewares = [];
-        this._hbTimer = null;
-        this._rateCleanupTimer = null;
-        this._wildcardHandler = null;
-        this._connectionHandler = null;
+        this.mw = [];
+        this._hb = null;
+        this._rc = null;
+        this._wild = null;
+        this._connH = null;
         this._acks = new Map();
-        this._externalServers = new WeakSet();
-        this._upgradeHandler = null;
-        this._requestHandler = null;
+        this._ext = new WeakSet();
+        this._upgH = null;
+        this._reqH = null;
         this._started = false;
         this._startTime = 0;
-        this._shuttingDown = false;
-        this._sigintHandler = null;
-        this._sigtermHandler = null;
-        this._totalConnections = 0;
-        this._totalMessagesReceived = 0;
-        this._totalMessagesSent = 0;
-        this._shutdownCallbacks = [];
-        this.port = options.port || 3000;
-        this.httpServer = options.server || null;
-        this.namespace = options.namespace || '/';
-        this.heartbeatInterval = options.heartbeatInterval || 30000;
-        this.heartbeatTimeout = options.heartbeatTimeout || this.heartbeatInterval * 2;
-        this.tcpPort = options.tcpPort !== undefined ? options.tcpPort : false;
-        this.maxConnections = options.maxConnections || 10000;
-        this.maxRooms = options.maxRooms || 10000;
-        this.maxRoomsPerClient = options.maxRoomsPerClient || 50;
-        this.maxPayloadSize = options.maxPayloadSize || 10 * 1024 * 1024; // 10 MB
-        this.maxFrameSize = options.maxFrameSize || DEFAULT_MAX_FRAME_SIZE;
-        this.maxWSFrameSize = options.maxFrameSize || DEFAULT_MAX_WS_FRAME_SIZE;
-        this.connectTimeout = options.connectTimeout || 10000;
-        this.doGracefulShutdown = options.gracefulShutdown !== false;
-        this.shutdownTimeout = options.shutdownTimeout || 10000;
-        this.healthEndpoint = options.healthEndpoint !== undefined ? options.healthEndpoint : '/health';
-        this.tlsOptions = options.tls;
-        this.allowedOrigins = options.allowedOrigins || null;
-        this._customRateLimiter = options.customRateLimiter || null;
-        this._customIPTracker = options.customIPTracker || null;
-        this._generateClientId = options.generateClientId || null;
-        this._customHealthHandler = options.customHealthHandler || null;
-        this.hooks = options.hooks || {};
-        this.eventRateLimiters = new Map();
-        this._clientRateOverrides = new Map();
-        if (options.eventRateLimits) {
-            for (const [event, config] of Object.entries(options.eventRateLimits)) {
-                this.eventRateLimiters.set(event, new RateLimiter(config.maxPoints, config.windowMs));
-            }
+        this._shutting = false;
+        this._sigH = { int: null, term: null };
+        this._totalConns = 0;
+        this._totalRecv = 0;
+        this._totalSent = 0;
+        this._shutdownCbs = [];
+        this.port = o.port || 3000;
+        this.httpServer = o.server || null;
+        this.ns = o.namespace || '/';
+        this.hbInterval = o.heartbeatInterval || 30000;
+        this.hbTimeout = o.heartbeatTimeout || this.hbInterval * 2;
+        this.tcpPort = o.tcpPort !== undefined ? o.tcpPort : false;
+        this.maxConns = o.maxConnections || 10000;
+        this.maxRooms = o.maxRooms || 10000;
+        this.maxRoomsPerClient = o.maxRoomsPerClient || 50;
+        this.maxPayload = o.maxPayloadSize || 10 * 1024 * 1024;
+        this.maxFrame = o.maxFrameSize || DEFAULT_MAX_FRAME_SIZE;
+        this.maxWSFrame = o.maxFrameSize || DEFAULT_MAX_WS_FRAME_SIZE;
+        this.connTimeout = o.connectTimeout || 10000;
+        this.doGraceful = o.gracefulShutdown !== false;
+        this.shutdownMs = o.shutdownTimeout || 10000;
+        this.healthPath = o.healthEndpoint !== undefined ? o.healthEndpoint : '/health';
+        this.tlsOpts = o.tls;
+        this.origins = o.allowedOrigins || null;
+        this._crl = o.customRateLimiter || null;
+        this._cit = o.customIPTracker || null;
+        this._genId = o.generateClientId || null;
+        this._healthFn = o.customHealthHandler || null;
+        this.hooks = o.hooks || {};
+        if (o.eventRateLimits)
+            for (const [ev, c] of Object.entries(o.eventRateLimits))
+                this.evRateLimits.set(ev, new RateLimiter(c.maxPoints, c.windowMs));
+        const rl = o.rateLimit && typeof o.rateLimit === 'object' ? o.rateLimit : {};
+        this.rateLimiter = o.rateLimit === false && !this._crl ? null : this._crl ? null : new RateLimiter(rl.maxPoints || 100, rl.windowMs || 1000);
+        this.ipTracker = this._cit ? new IPTracker() : new IPTracker(o.maxConnectionsPerIP || 50);
+        this.log = o.logger === false ? NULL_LOGGER : o.logger instanceof Logger ? o.logger : new Logger({ level: o.logger || 'info', prefix: 'stelar:server' });
+    }
+    static of(path, o = {}) { return new StelarServer({ ...o, namespace: path }); }
+    /* ── Runtime config ── */
+    updateConfig(o) {
+        if (o.maxConnections !== undefined)
+            this.maxConns = o.maxConnections;
+        if (o.maxConnectionsPerIP !== undefined && !this._cit)
+            this.ipTracker = new IPTracker(o.maxConnectionsPerIP);
+        if (o.maxRooms !== undefined)
+            this.maxRooms = o.maxRooms;
+        if (o.maxRoomsPerClient !== undefined)
+            this.maxRoomsPerClient = o.maxRoomsPerClient;
+        if (o.maxPayloadSize !== undefined)
+            this.maxPayload = o.maxPayloadSize;
+        if (o.heartbeatInterval !== undefined)
+            this.hbInterval = o.heartbeatInterval;
+        if (o.heartbeatTimeout !== undefined)
+            this.hbTimeout = o.heartbeatTimeout;
+        if (o.allowedOrigins !== undefined)
+            this.origins = o.allowedOrigins;
+        if (o.rateLimit === false) {
+            this.rateLimiter = null;
+            this._crl = null;
         }
-        if (options.rateLimit === false && !this._customRateLimiter) {
+        else if (o.rateLimit && !this._crl)
+            this.rateLimiter = new RateLimiter(o.rateLimit.maxPoints || 100, o.rateLimit.windowMs || 1000);
+        if (o.customRateLimiter !== undefined) {
+            this._crl = o.customRateLimiter;
             this.rateLimiter = null;
         }
-        else if (!this._customRateLimiter) {
-            const rl = options.rateLimit || {};
-            this.rateLimiter = new RateLimiter(rl.maxPoints || 100, rl.windowMs || 1000);
+        if (o.customIPTracker !== undefined)
+            this._cit = o.customIPTracker;
+        if (o.generateClientId !== undefined)
+            this._genId = o.generateClientId;
+        if (o.customHealthHandler !== undefined)
+            this._healthFn = o.customHealthHandler;
+        if (o.hooks !== undefined)
+            this.hooks = { ...this.hooks, ...o.hooks };
+        if (o.eventRateLimits !== undefined) {
+            this.evRateLimits.clear();
+            for (const [ev, c] of Object.entries(o.eventRateLimits))
+                this.evRateLimits.set(ev, new RateLimiter(c.maxPoints, c.windowMs));
         }
-        else {
-            this.rateLimiter = null;
-        }
-        if (!this._customIPTracker) {
-            this.ipTracker = new IPConnectionTracker(options.maxConnectionsPerIP || 50);
-        }
-        else {
-            this.ipTracker = new IPConnectionTracker(50); // unused when custom tracker is set
-        }
-        if (options.logger === false) {
-            this.log = NULL_LOGGER;
-        }
-        else if (options.logger instanceof Logger) {
-            this.log = options.logger;
-        }
-        else {
-            this.log = new Logger({
-                level: options.logger || 'info',
-                prefix: 'stelar:server',
-            });
-        }
-    }
-    static of(path, options = {}) {
-        return new StelarServer({ ...options, namespace: path });
-    }
-    /** Update server configuration at runtime. */
-    updateConfig(options) {
-        if (options.maxConnections !== undefined)
-            this.maxConnections = options.maxConnections;
-        if (options.maxConnectionsPerIP !== undefined && !this._customIPTracker) {
-            this.ipTracker = new IPConnectionTracker(options.maxConnectionsPerIP);
-        }
-        if (options.maxRooms !== undefined)
-            this.maxRooms = options.maxRooms;
-        if (options.maxRoomsPerClient !== undefined)
-            this.maxRoomsPerClient = options.maxRoomsPerClient;
-        if (options.maxPayloadSize !== undefined)
-            this.maxPayloadSize = options.maxPayloadSize;
-        if (options.heartbeatInterval !== undefined)
-            this.heartbeatInterval = options.heartbeatInterval;
-        if (options.heartbeatTimeout !== undefined)
-            this.heartbeatTimeout = options.heartbeatTimeout;
-        if (options.allowedOrigins !== undefined)
-            this.allowedOrigins = options.allowedOrigins;
-        if (options.rateLimit === false) {
-            this.rateLimiter = null;
-            this._customRateLimiter = null;
-        }
-        else if (options.rateLimit && !this._customRateLimiter) {
-            const rl = options.rateLimit;
-            this.rateLimiter = new RateLimiter(rl.maxPoints || 100, rl.windowMs || 1000);
-        }
-        if (options.customRateLimiter !== undefined) {
-            this._customRateLimiter = options.customRateLimiter;
-            this.rateLimiter = null;
-        }
-        if (options.customIPTracker !== undefined) {
-            this._customIPTracker = options.customIPTracker;
-        }
-        if (options.generateClientId !== undefined) {
-            this._generateClientId = options.generateClientId;
-        }
-        if (options.customHealthHandler !== undefined) {
-            this._customHealthHandler = options.customHealthHandler;
-        }
-        if (options.hooks !== undefined) {
-            this.hooks = { ...this.hooks, ...options.hooks };
-        }
-        if (options.eventRateLimits !== undefined) {
-            this.eventRateLimiters.clear();
-            for (const [event, config] of Object.entries(options.eventRateLimits)) {
-                this.eventRateLimiters.set(event, new RateLimiter(config.maxPoints, config.windowMs));
-            }
-        }
-        this.log.info('Server configuration updated');
+        this.log.info('Config updated');
         return this;
     }
-    /** Set a per-client rate limit override. */
-    setClientRateLimit(clientId, config) {
-        this._clientRateOverrides.set(clientId, new RateLimiter(config.maxPoints, config.windowMs));
-        return this;
-    }
-    /** Remove a per-client rate limit override, falling back to the global limiter. */
-    removeClientRateLimit(clientId) {
-        this._clientRateOverrides.delete(clientId);
-        return this;
-    }
-    /** Set a per-event rate limit. */
-    setEventRateLimit(event, config) {
-        this.eventRateLimiters.set(event, new RateLimiter(config.maxPoints, config.windowMs));
-        return this;
-    }
-    /** Remove a per-event rate limit. */
-    removeEventRateLimit(event) {
-        this.eventRateLimiters.delete(event);
-        return this;
-    }
-    /** Get the current server configuration as a read-only object. */
+    setClientRateLimit(id, c) { this.clientRates.set(id, new RateLimiter(c.maxPoints, c.windowMs)); return this; }
+    removeClientRateLimit(id) { this.clientRates.delete(id); return this; }
+    setEventRateLimit(ev, c) { this.evRateLimits.set(ev, new RateLimiter(c.maxPoints, c.windowMs)); return this; }
+    removeEventRateLimit(ev) { this.evRateLimits.delete(ev); return this; }
     getConfig() {
         return Object.freeze({
-            maxConnections: this.maxConnections,
-            maxConnectionsPerIP: this._customIPTracker ? -1 : this.ipTracker.maxPerIP || 50,
-            maxRooms: this.maxRooms,
-            maxRoomsPerClient: this.maxRoomsPerClient,
-            maxPayloadSize: this.maxPayloadSize,
-            heartbeatInterval: this.heartbeatInterval,
-            heartbeatTimeout: this.heartbeatTimeout,
-            connectTimeout: this.connectTimeout,
-            shutdownTimeout: this.shutdownTimeout,
-            hasCustomRateLimiter: this._customRateLimiter !== null,
-            hasCustomIPTracker: this._customIPTracker !== null,
-            hasCustomClientIdGenerator: this._generateClientId !== null,
-            hasCustomHealthHandler: this._customHealthHandler !== null,
-            eventRateLimits: Array.from(this.eventRateLimiters.keys()),
-            hooks: Object.keys(this.hooks),
-            allowedOrigins: this.allowedOrigins,
+            maxConnections: this.maxConns, maxConnectionsPerIP: this._cit ? -1 : 50,
+            maxRooms: this.maxRooms, maxRoomsPerClient: this.maxRoomsPerClient, maxPayloadSize: this.maxPayload,
+            heartbeatInterval: this.hbInterval, heartbeatTimeout: this.hbTimeout, connectTimeout: this.connTimeout,
+            shutdownTimeout: this.shutdownMs, hasCustomRateLimiter: this._crl !== null, hasCustomIPTracker: this._cit !== null,
+            hasCustomClientIdGenerator: this._genId !== null, hasCustomHealthHandler: this._healthFn !== null,
+            eventRateLimits: Array.from(this.evRateLimits.keys()), hooks: Object.keys(this.hooks), allowedOrigins: this.origins,
         });
     }
-    use(middleware) {
-        this.middlewares.push(middleware);
-        return this;
-    }
-    on(event, handler) {
-        this.events.set(event, handler);
-        return this;
-    }
-    onAll(handler) {
-        this._wildcardHandler = handler;
-        return this;
-    }
-    onConnection(handler) {
-        this._connectionHandler = handler;
-        return this;
-    }
-    onDisconnect(handler) {
-        this.events.set('disconnect', handler);
-        return this;
-    }
-    onAck(name, handler) {
-        this._acks.set(name, handler);
-        return this;
-    }
+    /* ── Event registration ── */
+    use(mw) { this.mw.push(mw); return this; }
+    on(ev, h) { this.events.set(ev, h); return this; }
+    onAll(h) { this._wild = h; return this; }
+    onConnection(h) { this._connH = h; return this; }
+    onDisconnect(h) { this.events.set('disconnect', h); return this; }
+    onAck(name, h) { this._acks.set(name, h); return this; }
+    /* ── Messaging ── */
     broadcast(event, data, excludeId) {
-        if (this.hooks.onBeforeBroadcast) {
-            const result = this.hooks.onBeforeBroadcast({ event, data, excludeId });
-            if (result === false)
-                return this;
-        }
+        if (this.hooks.onBeforeBroadcast?.({ event, data, excludeId }) === false)
+            return this;
+        const wsF = createWSTextFrame(JSON.stringify({ event, data }));
+        const tcpF = encodeJsonFrame(event, data, this.maxFrame);
         let sent = 0;
-        this.clients.forEach((record) => {
-            if (excludeId && record.info.id === excludeId)
-                return;
-            if (this._sendJsonToClient(record, event, data))
-                sent++;
-        });
-        this._totalMessagesSent += sent;
+        this.clients.forEach(r => { if (excludeId && r.info.id === excludeId)
+            return; if (this._write(r, wsF, tcpF))
+            sent++; });
+        this._totalSent += sent;
         return this;
     }
-    broadcastBinary(event, buffer) {
-        this.clients.forEach((record) => {
-            this._sendBinaryRaw(record, event, buffer);
-        });
-    }
+    broadcastBinary(event, buf) { this.clients.forEach(r => this._sendBin(r, event, buf)); }
     to(room, event, data, excludeId) {
-        const memberIds = this.rooms.get(room);
-        if (!memberIds)
+        const ids = this.rooms.get(room);
+        if (!ids)
             return this;
+        const wsF = createWSTextFrame(JSON.stringify({ event, data }));
+        const tcpF = encodeJsonFrame(event, data, this.maxFrame);
         let sent = 0;
-        for (const clientId of memberIds) {
-            if (excludeId && clientId === excludeId)
+        for (const id of ids) {
+            if (excludeId && id === excludeId)
                 continue;
-            const record = this.clientsById.get(clientId);
-            if (record && this._sendJsonToClient(record, event, data))
+            const r = this.byId.get(id);
+            if (r && this._write(r, wsF, tcpF))
                 sent++;
         }
-        this._totalMessagesSent += sent;
+        this._totalSent += sent;
         return this;
     }
     toId(id, event, data) {
-        const record = this.clientsById.get(id);
-        if (record && this._sendJsonToClient(record, event, data)) {
-            this._totalMessagesSent++;
-        }
+        const r = this.byId.get(id);
+        if (r && this._sendJson(r, event, data))
+            this._totalSent++;
         return this;
     }
     getClients(room) {
         const list = [];
-        this.clients.forEach((record) => {
-            if (!room || record.info.rooms.has(room)) {
-                list.push({ id: record.info.id, rooms: Array.from(record.info.rooms) });
-            }
-        });
+        this.clients.forEach(r => { if (!room || r.info.rooms.has(room))
+            list.push({ id: r.info.id, rooms: [...r.info.rooms] }); });
         return list;
     }
-    getRoomMembers(room) {
-        const members = this.rooms.get(room);
-        return members ? Array.from(members) : [];
-    }
-    getRooms() {
-        return Array.from(this.rooms.keys());
-    }
-    getPort() {
-        const address = this.httpServer?.address();
-        if (address && typeof address === 'object') {
-            return address.port;
-        }
-        return this.port;
-    }
+    getRoomMembers(room) { return this.rooms.get(room) ? [...this.rooms.get(room)] : []; }
+    getRooms() { return [...this.rooms.keys()]; }
+    getPort() { const a = this.httpServer?.address(); return a && typeof a === 'object' ? a.port : this.port; }
     getStats() {
-        let wsConns = 0;
-        let tcpConns = 0;
-        this.clients.forEach((r) => {
-            if (r.protocol === 'ws')
-                wsConns++;
-            else
-                tcpConns++;
-        });
+        let ws = 0, tcp = 0;
+        this.clients.forEach(r => r.protocol === 'ws' ? ws++ : tcp++);
         return {
-            totalConnections: this._totalConnections,
-            activeConnections: this.clients.size,
-            totalMessagesReceived: this._totalMessagesReceived,
-            totalMessagesSent: this._totalMessagesSent,
-            totalRooms: this.rooms.size,
-            uptime: this._startTime ? Date.now() - this._startTime : 0,
-            wsConnections: wsConns,
-            tcpConnections: tcpConns,
-            memoryUsage: process.memoryUsage(),
-            rateLimiterEntries: this._getRateLimiterSize(),
+            totalConnections: this._totalConns, activeConnections: this.clients.size,
+            totalMessagesReceived: this._totalRecv, totalMessagesSent: this._totalSent,
+            totalRooms: this.rooms.size, uptime: this._startTime ? Date.now() - this._startTime : 0,
+            wsConnections: ws, tcpConnections: tcp, memoryUsage: process.memoryUsage(),
+            rateLimiterEntries: this._crl?.size() ?? this.rateLimiter?.size() ?? 0,
         };
     }
-    _getRateLimiterSize() {
-        if (this._customRateLimiter)
-            return this._customRateLimiter.size();
-        return this.rateLimiter?.size() || 0;
+    onShutdown(cb) { this._shutdownCbs.push(cb); return this; }
+    /* ── Private: send helpers ── */
+    _sendJson(r, event, data) {
+        if (r.socket.destroyed || r.socket.writableEnded)
+            return false;
+        try {
+            r.socket.write(r.protocol === 'ws' ? createWSTextFrame(JSON.stringify({ event, data })) : encodeJsonFrame(event, data, this.maxFrame));
+            r.info.messagesSent++;
+            return true;
+        }
+        catch {
+            return false;
+        }
     }
-    /** Check rate limit. Priority: per-client override > event-specific > custom/global. */
-    _checkRateLimit(clientId, event) {
-        const clientOverride = this._clientRateOverrides.get(clientId);
-        if (clientOverride) {
-            return clientOverride.check(clientId);
+    _write(r, wsF, tcpF) {
+        if (r.socket.destroyed || r.socket.writableEnded)
+            return false;
+        try {
+            r.socket.write(r.protocol === 'ws' ? wsF : tcpF);
+            r.info.messagesSent++;
+            return true;
         }
-        if (event && this.eventRateLimiters.has(event)) {
-            const eventLimiter = this.eventRateLimiters.get(event);
-            if (!eventLimiter.check(clientId))
-                return false;
+        catch {
+            return false;
         }
-        if (this._customRateLimiter) {
-            return this._customRateLimiter.check(clientId);
+    }
+    _sendBin(r, event, buf) {
+        if (r.socket.destroyed || r.socket.writableEnded)
+            return false;
+        try {
+            if (r.protocol === 'ws') {
+                const hdr = Buffer.from(JSON.stringify({ event, _binary: true }), 'utf8');
+                const combined = Buffer.alloc(hdr.length + 1 + buf.byteLength);
+                hdr.copy(combined, 0);
+                combined[hdr.length] = 0;
+                combined.set(new Uint8Array(buf), hdr.length + 1);
+                r.socket.write(createWSBinaryFrame(combined));
+            }
+            else {
+                r.socket.write(encodeBinaryFrame(event, new Uint8Array(buf), this.maxFrame));
+            }
+            r.info.messagesSent++;
+            return true;
         }
-        if (this.rateLimiter) {
-            return this.rateLimiter.check(clientId);
+        catch {
+            return false;
         }
+    }
+    _checkRate(cid, event) {
+        const co = this.clientRates.get(cid);
+        if (co)
+            return co.check(cid);
+        if (event && this.evRateLimits.has(event) && !this.evRateLimits.get(event).check(cid))
+            return false;
+        if (this._crl)
+            return this._crl.check(cid);
+        if (this.rateLimiter)
+            return this.rateLimiter.check(cid);
         return true;
     }
-    _sendJsonToClient(record, event, data) {
-        if (record.socket.destroyed || record.socket.writableEnded)
-            return false;
-        try {
-            if (record.protocol === 'ws') {
-                const json = JSON.stringify({ event, data });
-                record.socket.write(createWSTextFrame(json));
-            }
-            else {
-                record.socket.write(encodeJsonFrame(event, data, this.maxFrameSize));
-            }
-            record.info.messagesSent++;
-            return true;
-        }
-        catch (err) {
-            this.log.error('Send error', { clientId: record.info.id, error: String(err) });
-            return false;
-        }
-    }
-    _sendBinaryRaw(record, event, buffer) {
-        if (record.socket.destroyed || record.socket.writableEnded)
-            return false;
-        try {
-            if (record.protocol === 'ws') {
-                const header = JSON.stringify({ event, _binary: true });
-                const headerBytes = Buffer.from(header, 'utf8');
-                const combined = Buffer.alloc(headerBytes.length + 1 + buffer.byteLength);
-                headerBytes.copy(combined, 0);
-                combined[headerBytes.length] = 0;
-                combined.set(new Uint8Array(buffer), headerBytes.length + 1);
-                record.socket.write(createWSBinaryFrame(combined));
-            }
-            else {
-                record.socket.write(encodeBinaryFrame(event, new Uint8Array(buffer), this.maxFrameSize));
-            }
-            record.info.messagesSent++;
-            return true;
-        }
-        catch (err) {
-            this.log.error('Binary send error', { clientId: record.info.id, error: String(err) });
-            return false;
-        }
-    }
-    _joinRoom(record, room) {
-        if (this.hooks.onClientJoinRoom) {
-            const result = this.hooks.onClientJoinRoom({
-                clientId: record.info.id,
-                room,
-                metadata: record.info.metadata,
-            });
-            if (result === false) {
-                this.log.info('Room join rejected by hook', { clientId: record.info.id, room });
-                return;
-            }
-        }
-        if (record.info.rooms.size >= this.maxRoomsPerClient) {
-            if (this.hooks.onMaxRoomsPerClientReached) {
-                const result = this.hooks.onMaxRoomsPerClientReached({
-                    clientId: record.info.id,
-                    room,
-                    currentRooms: record.info.rooms.size,
-                    max: this.maxRoomsPerClient,
-                });
-                if (result === false)
-                    return;
-            }
-            this.log.warn('Client exceeded max rooms', { clientId: record.info.id, room, max: this.maxRoomsPerClient });
-            return;
-        }
-        if (this.rooms.size >= this.maxRooms && !this.rooms.has(room)) {
-            if (this.hooks.onMaxRoomsReached) {
-                const result = this.hooks.onMaxRoomsReached({
-                    clientId: record.info.id,
-                    room,
-                    totalRooms: this.rooms.size,
-                    max: this.maxRooms,
-                });
-                if (result === false)
-                    return;
-            }
-            this.log.warn('Server exceeded max rooms', { room, max: this.maxRooms });
-            return;
-        }
-        record.info.rooms.add(room);
-        if (!this.rooms.has(room)) {
-            this.rooms.set(room, new Set());
-        }
-        this.rooms.get(room).add(record.info.id);
-        this._sendJsonToClient(record, 'joined-room', room);
-    }
-    _leaveRoom(record, room) {
-        if (this.hooks.onClientLeaveRoom) {
-            const result = this.hooks.onClientLeaveRoom({
-                clientId: record.info.id,
-                room,
-            });
-            if (result === false) {
-                this.log.info('Room leave rejected by hook', { clientId: record.info.id, room });
-                return;
-            }
-        }
-        record.info.rooms.delete(room);
-        const members = this.rooms.get(room);
-        if (members) {
-            members.delete(record.info.id);
-            if (members.size === 0) {
-                this.rooms.delete(room);
-            }
-        }
-        this._sendJsonToClient(record, 'left-room', room);
-    }
-    _removeFromAllRooms(record) {
-        for (const room of record.info.rooms) {
-            const members = this.rooms.get(room);
-            if (members) {
-                members.delete(record.info.id);
-                if (members.size === 0) {
-                    this.rooms.delete(room);
-                }
-            }
-        }
-        record.info.rooms.clear();
-    }
-    _buildCtx(record, req) {
-        const self = this;
-        const ctx = {
-            id: record.info.id,
-            socket: record.socket,
-            req,
-            clientInfo: record.info,
-            emit: (evt, d) => { if (self._sendJsonToClient(record, evt, d))
-                self._totalMessagesSent++; },
-            send: (respId, d) => { if (self._sendJsonToClient(record, respId, { data: d, _isAck: true }))
-                self._totalMessagesSent++; },
-            emitBinary: (evt, buf) => { if (self._sendBinaryRaw(record, evt, buf))
-                self._totalMessagesSent++; },
-            broadcast: (evt, d) => self.broadcast(evt, d, record.info.id),
-            broadcastBinary: (evt, buf) => self.broadcastBinary(evt, buf),
-            to: (room, evt, d) => self.to(room, evt, d, record.info.id),
-            toId: (id, evt, d) => self.toId(id, evt, d),
-            getClients: (room) => self.getClients(room),
-            joinRoom: (room) => self._joinRoom(record, room),
-            leaveRoom: (room) => self._leaveRoom(record, room),
-            setMetadata: (key, value) => record.info.metadata.set(key, value),
-            getMetadata: (key) => record.info.metadata.get(key),
-            ack: (ackName, d) => {
-                const ackHandler = self._acks.get(ackName);
-                if (ackHandler) {
-                    const result = ackHandler({ ...ctx, data: d });
-                    if (result !== undefined) {
-                        try {
-                            if (record.protocol === 'ws') {
-                                record.socket.write(createWSTextFrame(JSON.stringify({ event: ackName, data: result, _isAck: true })));
-                            }
-                            else {
-                                record.socket.write(encodeAckResFrame(ackName, result, self.maxFrameSize));
-                            }
-                            self._totalMessagesSent++;
-                        }
-                        catch (err) {
-                            self.log.error('ACK send error', { ackName, error: String(err) });
-                        }
-                    }
-                }
-            }
-        };
-        return ctx;
-    }
-    runMiddlewares(ctx, next) {
-        const run = (i) => {
-            if (i >= this.middlewares.length)
-                return next();
-            try {
-                this.middlewares[i](ctx, () => run(i + 1));
-            }
-            catch (err) {
-                this.log.error('Middleware error', { error: String(err), clientId: ctx.id });
-                ctx.socket.destroy();
-            }
-        };
-        run(0);
-    }
-    startHeartbeat() {
-        this._hbTimer = setInterval(() => {
-            const now = Date.now();
-            this.clients.forEach((record) => {
-                if (now - record.info.lastPing > this.heartbeatTimeout) {
-                    this.log.info('Client heartbeat timeout', { clientId: record.info.id });
-                    record.socket.destroy();
-                }
-                else {
-                    try {
-                        if (record.protocol === 'ws') {
-                            record.socket.write(createWSPingFrame());
-                        }
-                        else {
-                            record.socket.write(encodePingFrame());
-                        }
-                    }
-                    catch {
-                        // socket may have closed
-                    }
-                }
-            });
-        }, this.heartbeatInterval);
-        if (this._hbTimer && typeof this._hbTimer === 'object' && 'unref' in this._hbTimer) {
-            this._hbTimer.unref();
-        }
-    }
-    _getClientIP(socket, req) {
+    _getIP(socket, req) {
         if (req) {
-            const forwarded = req.headers['x-forwarded-for'];
-            if (typeof forwarded === 'string') {
-                return forwarded.split(',')[0].trim();
-            }
+            const fwd = req.headers['x-forwarded-for'];
+            if (typeof fwd === 'string')
+                return fwd.split(',')[0].trim();
         }
         return socket.remoteAddress || 'unknown';
     }
-    _registerClient(socket, protocol, req, parser) {
-        if (this.clients.size >= this.maxConnections) {
-            const clientIP = this._getClientIP(socket, req);
-            if (this.hooks.onMaxConnectionsReached) {
-                this.hooks.onMaxConnectionsReached({
-                    activeConnections: this.clients.size,
-                    max: this.maxConnections,
-                    ip: clientIP,
-                });
-            }
-            this.log.warn('Max connections reached, rejecting', { active: this.clients.size, max: this.maxConnections });
-            try {
-                if (protocol === 'ws') {
+    /* ── Private: client lifecycle ── */
+    _register(socket, proto, req, parser) {
+        const ip = this._getIP(socket, req);
+        if (this.clients.size >= this.maxConns) {
+            this.hooks.onMaxConnectionsReached?.({ activeConnections: this.clients.size, max: this.maxConns, ip });
+            this.log.warn('Max connections reached', { active: this.clients.size, max: this.maxConns });
+            if (proto === 'ws')
+                try {
                     socket.write(createWSCloseFrame(CLOSE_POLICY_VIOLATION, 'Server full'));
                 }
-            }
-            catch { /* ignore */ }
+                catch { }
             socket.destroy();
             return null;
         }
-        const clientIP = this._getClientIP(socket, req);
-        const ipTracker = this._customIPTracker || this.ipTracker;
-        if (!ipTracker.check(clientIP)) {
-            this.log.warn('Max connections per IP reached, rejecting', { ip: clientIP });
-            try {
-                if (protocol === 'ws') {
-                    socket.write(createWSCloseFrame(CLOSE_POLICY_VIOLATION, 'Too many connections from this IP'));
+        const tracker = this._cit || this.ipTracker;
+        if (!tracker.check(ip)) {
+            this.log.warn('Max connections per IP', { ip });
+            if (proto === 'ws')
+                try {
+                    socket.write(createWSCloseFrame(CLOSE_POLICY_VIOLATION, 'Too many connections'));
                 }
-            }
-            catch { /* ignore */ }
+                catch { }
             socket.destroy();
             return null;
         }
-        const clientId = this._generateClientId ? this._generateClientId() : randomUUID();
-        const info = {
-            id: clientId,
-            rooms: new Set(),
-            lastPing: Date.now(),
-            protocol,
-            connectedAt: Date.now(),
-            metadata: new Map(),
-            messagesReceived: 0,
-            messagesSent: 0,
-            remoteAddress: clientIP,
-        };
-        const record = { info, socket, parser, protocol };
+        const id = this._genId ? this._genId() : randomUUID();
+        const info = { id, rooms: new Set(), lastPing: Date.now(), protocol: proto, connectedAt: Date.now(), metadata: new Map(), messagesReceived: 0, messagesSent: 0, remoteAddress: ip };
+        const record = { info, socket, parser, protocol: proto };
         this.clients.set(socket, record);
-        this.clientsById.set(clientId, record);
-        ipTracker.add(clientIP);
-        this._totalConnections++;
+        this.byId.set(id, record);
+        tracker.add(ip);
+        this._totalConns++;
         return record;
     }
-    _unregisterClient(record, ctx) {
-        if (this.hooks.onClientDisconnect) {
-            this.hooks.onClientDisconnect({
-                clientId: record.info.id,
-                ip: record.info.remoteAddress,
-                protocol: record.info.protocol,
-                rooms: new Set(record.info.rooms),
-            });
+    _unregister(r, ctx) {
+        this.hooks.onClientDisconnect?.({ clientId: r.info.id, ip: r.info.remoteAddress, protocol: r.info.protocol, rooms: new Set(r.info.rooms) });
+        for (const room of r.info.rooms) {
+            const m = this.rooms.get(room);
+            if (m) {
+                m.delete(r.info.id);
+                if (!m.size)
+                    this.rooms.delete(room);
+            }
         }
-        this._removeFromAllRooms(record);
-        this.clientsById.delete(record.info.id);
-        this.clients.delete(record.socket);
-        const ipTracker = this._customIPTracker || this.ipTracker;
-        ipTracker.remove(record.info.remoteAddress);
-        if (this._customRateLimiter) {
-            this._customRateLimiter.reset(record.info.id);
-        }
-        else if (this.rateLimiter) {
-            this.rateLimiter.reset(record.info.id);
-        }
-        this._clientRateOverrides.delete(record.info.id);
-        if (this.events.has('disconnect')) {
-            const handler = this.events.get('disconnect');
+        r.info.rooms.clear();
+        this.byId.delete(r.info.id);
+        this.clients.delete(r.socket);
+        (this._cit || this.ipTracker).remove(r.info.remoteAddress);
+        if (this._crl)
+            this._crl.reset(r.info.id);
+        else
+            this.rateLimiter?.reset(r.info.id);
+        this.clientRates.delete(r.info.id);
+        const h = this.events.get('disconnect');
+        if (h)
             try {
-                handler({ ...ctx, event: 'disconnect' });
+                h({ ...ctx, event: 'disconnect' });
             }
-            catch (err) {
-                this.log.error('Disconnect handler error', { error: String(err) });
+            catch (e) {
+                this.log.error('Disconnect handler error', { error: String(e) });
             }
+    }
+    _joinRoom(r, room) {
+        if (this.hooks.onClientJoinRoom?.({ clientId: r.info.id, room, metadata: r.info.metadata }) === false)
+            return;
+        if (r.info.rooms.size >= this.maxRoomsPerClient) {
+            this.hooks.onMaxRoomsPerClientReached?.({ clientId: r.info.id, room, currentRooms: r.info.rooms.size, max: this.maxRoomsPerClient });
+            return;
         }
+        if (this.rooms.size >= this.maxRooms && !this.rooms.has(room)) {
+            this.hooks.onMaxRoomsReached?.({ clientId: r.info.id, room, totalRooms: this.rooms.size, max: this.maxRooms });
+            return;
+        }
+        r.info.rooms.add(room);
+        if (!this.rooms.has(room))
+            this.rooms.set(room, new Set());
+        this.rooms.get(room).add(r.info.id);
+        this._sendJson(r, 'joined-room', room);
     }
-    _checkOrigin(req) {
-        if (!this.allowedOrigins)
-            return true;
-        const origin = req.headers['origin'];
-        if (!origin)
-            return true;
-        return this.allowedOrigins.includes(origin);
+    _leaveRoom(r, room) {
+        if (this.hooks.onClientLeaveRoom?.({ clientId: r.info.id, room }) === false)
+            return;
+        r.info.rooms.delete(room);
+        const m = this.rooms.get(room);
+        if (m) {
+            m.delete(r.info.id);
+            if (!m.size)
+                this.rooms.delete(room);
+        }
+        this._sendJson(r, 'left-room', room);
     }
-    handleWSUpgrade(req, socket, head) {
-        const urlPath = new URL(req.url || '/', 'http://localhost').pathname;
-        const nsPath = this.namespace === '/' ? '/' : this.namespace;
-        if (nsPath !== '/' && urlPath !== nsPath) {
-            this.log.debug('Rejected WS: wrong namespace', { path: urlPath, expected: nsPath });
+    /* ── Private: context & middleware ── */
+    _buildCtx(r, req) {
+        const s = this;
+        const ctx = {
+            id: r.info.id, socket: r.socket, req, clientInfo: r.info,
+            emit: (ev, d) => { if (s._sendJson(r, ev, d))
+                s._totalSent++; },
+            send: (rid, d) => { if (s._sendJson(r, rid, { data: d, _isAck: true }))
+                s._totalSent++; },
+            emitBinary: (ev, buf) => { if (s._sendBin(r, ev, buf))
+                s._totalSent++; },
+            broadcast: (ev, d) => s.broadcast(ev, d, r.info.id),
+            broadcastBinary: (ev, buf) => s.broadcastBinary(ev, buf),
+            to: (room, ev, d) => s.to(room, ev, d, r.info.id),
+            toId: (id, ev, d) => s.toId(id, ev, d),
+            getClients: (room) => s.getClients(room),
+            joinRoom: (room) => s._joinRoom(r, room),
+            leaveRoom: (room) => s._leaveRoom(r, room),
+            setMetadata: (k, v) => r.info.metadata.set(k, v),
+            getMetadata: (k) => r.info.metadata.get(k),
+            ack: (name, d) => {
+                const h = s._acks.get(name);
+                if (!h)
+                    return;
+                let res;
+                try {
+                    res = h({ ...ctx, data: d });
+                }
+                catch (e) {
+                    s.log.error('ACK handler error', { name, error: String(e) });
+                    return;
+                }
+                if (res !== undefined) {
+                    try {
+                        if (r.protocol === 'ws') {
+                            const p = { event: name, data: res, _isAck: true };
+                            if (ctx._correlationId)
+                                p._correlationId = ctx._correlationId;
+                            r.socket.write(createWSTextFrame(JSON.stringify(p)));
+                        }
+                        else {
+                            r.socket.write(ctx._correlationId
+                                ? encodeAckResFrame(name, { data: res, _correlationId: ctx._correlationId }, s.maxFrame)
+                                : encodeAckResFrame(name, res, s.maxFrame));
+                        }
+                        s._totalSent++;
+                    }
+                    catch (e) {
+                        s.log.error('ACK send error', { name, error: String(e) });
+                    }
+                }
+            },
+        };
+        return ctx;
+    }
+    _runMw(ctx, next) {
+        const run = (i) => { if (i >= this.mw.length)
+            return next(); try {
+            this.mw[i](ctx, () => run(i + 1));
+        }
+        catch {
+            ctx.socket.destroy();
+        } };
+        run(0);
+    }
+    /* ── Private: event dispatch (shared by WS & TCP) ── */
+    _dispatch(r, ctx, event, data, correlationId) {
+        if (event === 'pong') {
+            r.info.lastPing = Date.now();
+            return;
+        }
+        if (event === 'join-room') {
+            if (data)
+                this._joinRoom(r, String(data));
+            return;
+        }
+        if (event === 'leave-room') {
+            if (data)
+                this._leaveRoom(r, String(data));
+            return;
+        }
+        const ectx = { ...ctx, data, event, _correlationId: correlationId };
+        const h = this.events.get(event);
+        if (h)
+            try {
+                h(ectx);
+            }
+            catch (e) {
+                this.log.error('Event handler error', { event, error: String(e) });
+            }
+        if (this._wild)
+            try {
+                this._wild({ event, data: ectx });
+            }
+            catch (e) {
+                this.log.error('Wildcard error', { error: String(e) });
+            }
+    }
+    /* ── Private: heartbeat ── */
+    _startHeartbeat() {
+        this._hb = setInterval(() => {
+            const now = Date.now();
+            this.clients.forEach(r => {
+                if (now - r.info.lastPing > this.hbTimeout) {
+                    r.socket.destroy();
+                }
+                else
+                    try {
+                        r.socket.write(r.protocol === 'ws' ? createWSPingFrame() : encodePingFrame());
+                    }
+                    catch { }
+            });
+        }, this.hbInterval);
+        this._hb?.unref?.();
+    }
+    /* ── Private: WS upgrade ── */
+    _wsUpgrade(req, socket, head) {
+        const path = new URL(req.url || '/', 'http://localhost').pathname;
+        const nsPath = this.ns === '/' ? '/' : this.ns;
+        if (nsPath !== '/' && path !== nsPath) {
             socket.destroy();
             return;
         }
-        if (!this._checkOrigin(req)) {
-            this.log.warn('Rejected WS: origin not allowed', { origin: req.headers['origin'] });
+        if (this.origins && !this.origins.includes(req.headers['origin'] || '')) {
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
             return;
         }
         const key = req.headers['sec-websocket-key'];
         if (!key || !validateWSKey(key)) {
-            this.log.warn('Invalid WebSocket key');
             socket.destroy();
             return;
         }
         try {
-            const extraHeaders = {};
+            const extra = {};
             const origin = req.headers['origin'];
-            if (origin && this.allowedOrigins && this.allowedOrigins.includes(origin)) {
-                extraHeaders['Access-Control-Allow-Origin'] = origin;
-            }
-            socket.write(buildUpgradeResponse(key, extraHeaders));
+            if (origin && this.origins?.includes(origin))
+                extra['Access-Control-Allow-Origin'] = origin;
+            socket.write(buildUpgradeResponse(key, extra));
         }
         catch {
             socket.destroy();
             return;
         }
-        const connectTimer = setTimeout(() => {
-            if (!this.clients.has(socket)) {
-                this.log.warn('WS connect timeout');
-                socket.destroy();
-            }
-        }, this.connectTimeout);
-        connectTimer.unref();
-        const record = this._registerClient(socket, 'ws', req, new WSFrameParser(this.maxWSFrameSize));
-        if (!record) {
-            clearTimeout(connectTimer);
+        const timer = setTimeout(() => { if (!this.clients.has(socket))
+            socket.destroy(); }, this.connTimeout);
+        timer.unref();
+        const r = this._register(socket, 'ws', req, new WSFrameParser(this.maxWSFrame));
+        if (!r) {
+            clearTimeout(timer);
             return;
         }
-        const ctx = this._buildCtx(record, req);
-        if (this.hooks.onClientConnect) {
-            this.hooks.onClientConnect({
-                clientId: record.info.id,
-                ip: record.info.remoteAddress,
-                protocol: 'ws',
-                metadata: record.info.metadata,
-            });
-        }
-        this.runMiddlewares(ctx, () => {
-            if (this._connectionHandler) {
-                try {
-                    this._connectionHandler(ctx);
-                }
-                catch (err) {
-                    this.log.error('Connection handler error', { error: String(err) });
-                }
+        const ctx = this._buildCtx(r, req);
+        this.hooks.onClientConnect?.({ clientId: r.info.id, ip: r.info.remoteAddress, protocol: 'ws', metadata: r.info.metadata });
+        this._runMw(ctx, () => { if (this._connH)
+            try {
+                this._connH(ctx);
             }
-        });
-        this.log.info('WS client connected', { clientId: record.info.id, ip: record.info.remoteAddress });
-        if (head.length > 0) {
-            this._processWSData(record, head, ctx, req);
-        }
-        socket.on('data', (data) => {
-            clearTimeout(connectTimer);
-            this._processWSData(record, data, ctx, req);
-        });
-        socket.on('close', () => {
-            clearTimeout(connectTimer);
-            this.log.debug('WS client socket closed', { clientId: record.info.id });
-            this._unregisterClient(record, ctx);
-        });
-        socket.on('error', (err) => {
-            this.log.warn('WS client error', { clientId: record.info.id, error: err.message });
-            this._handleError(record, ctx, err);
-        });
-        socket.on('drain', () => {
-            socket.resume();
-        });
+            catch (e) {
+                this.log.error('Connection handler error', { error: String(e) });
+            } });
+        this.log.info('WS connected', { clientId: r.info.id, ip: r.info.remoteAddress });
+        if (head.length > 0)
+            this._processWS(r, head, ctx);
+        socket.on('data', (d) => { clearTimeout(timer); this._processWS(r, d, ctx); });
+        socket.on('close', () => { clearTimeout(timer); this._unregister(r, ctx); });
+        socket.on('error', (e) => { this.log.warn('WS error', { clientId: r.info.id, error: e.message }); this._handleErr(r, ctx, e); });
+        socket.on('drain', () => socket.resume());
     }
-    _processWSData(record, data, ctx, req) {
+    _processWS(r, data, ctx) {
         let frames;
         try {
-            frames = record.parser.feed(data);
+            frames = r.parser.feed(data);
         }
-        catch (err) {
-            if (err instanceof WebSocketError) {
-                this.log.warn('WS protocol error', { clientId: record.info.id, code: err.code, message: err.message });
+        catch (e) {
+            if (e instanceof WebSocketError) {
+                this.log.warn('WS protocol error', { code: e.code, message: e.message });
                 try {
-                    record.socket.write(createWSCloseFrame(err.code, err.message));
+                    r.socket.write(createWSCloseFrame(e.code, e.message));
                 }
-                catch { /* ignore */ }
+                catch { }
             }
-            else {
-                this.log.error('WS frame parse error', { clientId: record.info.id, error: String(err) });
-            }
-            record.socket.destroy();
+            else
+                this.log.error('WS parse error', { error: String(e) });
+            r.socket.destroy();
             return;
         }
-        for (const frame of frames) {
-            if (record.socket.destroyed)
-                break;
-            this._handleWSFrame(record, frame, ctx, req);
+        for (const f of frames) {
+            if (!r.socket.destroyed)
+                this._handleWSFrame(r, f, ctx);
         }
     }
-    _handleWSFrame(record, frame, ctx, _req) {
+    _handleWSFrame(r, frame, ctx) {
         const { opcode, payload } = frame;
         if (opcode === OP_PING) {
             try {
-                record.socket.write(createWSPongFrame(payload));
+                r.socket.write(createWSPongFrame(payload));
             }
-            catch { /* ignore */ }
+            catch { }
             return;
         }
         if (opcode === OP_CLOSE) {
             try {
-                record.socket.write(createWSCloseFrame(CLOSE_NORMAL));
+                r.socket.write(createWSCloseFrame());
             }
-            catch { /* ignore */ }
-            record.socket.end();
+            catch { }
+            r.socket.end();
             return;
         }
         if (opcode === OP_PONG) {
-            record.info.lastPing = Date.now();
+            r.info.lastPing = Date.now();
             return;
         }
-        if (!this._checkRateLimit(record.info.id)) {
-            this.log.warn('Rate limit exceeded', { clientId: record.info.id });
-            if (this.hooks.onRateLimitExceeded) {
-                const result = this.hooks.onRateLimitExceeded({
-                    clientId: record.info.id,
-                    protocol: 'ws',
-                });
-                if (result === false)
-                    return;
-            }
+        if (!this._checkRate(r.info.id)) {
+            this.log.warn('Rate limit exceeded', { clientId: r.info.id });
+            if (this.hooks.onRateLimitExceeded?.({ clientId: r.info.id, protocol: 'ws' }) === false)
+                return;
             try {
-                record.socket.write(createWSCloseFrame(CLOSE_POLICY_VIOLATION, 'Rate limit exceeded'));
+                r.socket.write(createWSCloseFrame(CLOSE_POLICY_VIOLATION, 'Rate limit exceeded'));
             }
-            catch { /* ignore */ }
-            record.socket.destroy();
+            catch { }
+            r.socket.destroy();
             return;
         }
         if (opcode === OP_TEXT) {
-            record.info.messagesReceived++;
-            this._totalMessagesReceived++;
-            if (payload.length > this.maxPayloadSize) {
-                if (this.hooks.onPayloadTooLarge) {
-                    this.hooks.onPayloadTooLarge({ clientId: record.info.id, size: payload.length, max: this.maxPayloadSize });
-                }
-                this.log.warn('Payload too large', { clientId: record.info.id, size: payload.length });
+            r.info.messagesReceived++;
+            this._totalRecv++;
+            if (payload.length > this.maxPayload) {
+                this.hooks.onPayloadTooLarge?.({ clientId: r.info.id, size: payload.length, max: this.maxPayload });
                 try {
-                    record.socket.write(createWSCloseFrame(CLOSE_MESSAGE_TOO_BIG, 'Payload too large'));
+                    r.socket.write(createWSCloseFrame(CLOSE_MESSAGE_TOO_BIG));
                 }
-                catch { /* ignore */ }
-                record.socket.destroy();
+                catch { }
+                r.socket.destroy();
                 return;
             }
             let msg;
@@ -869,298 +627,190 @@ class StelarServer {
                 msg = JSON.parse(payload.toString('utf8'));
             }
             catch {
-                if (this.hooks.onInvalidMessage) {
-                    this.hooks.onInvalidMessage({ clientId: record.info.id, reason: 'Invalid JSON', protocol: 'ws' });
-                }
-                this.log.warn('Invalid JSON from client', { clientId: record.info.id });
+                this.hooks.onInvalidMessage?.({ clientId: r.info.id, reason: 'Invalid JSON', protocol: 'ws' });
                 return;
             }
-            const event = String(msg.event || '');
-            const data = msg.data;
+            const event = String(msg.event || ''), data = msg.data, corrId = msg._correlationId ? String(msg._correlationId) : undefined;
             if (!event)
                 return;
-            if (event && !this._checkRateLimit(record.info.id, event)) {
-                this.log.warn('Event rate limit exceeded', { clientId: record.info.id, event });
-                if (this.hooks.onRateLimitExceeded) {
-                    const result = this.hooks.onRateLimitExceeded({
-                        clientId: record.info.id,
-                        event,
-                        protocol: 'ws',
-                    });
-                    if (result === false)
-                        return;
-                }
+            if (!this._checkRate(r.info.id, event)) {
+                this.log.warn('Event rate limit', { clientId: r.info.id, event });
+                if (this.hooks.onRateLimitExceeded?.({ clientId: r.info.id, event, protocol: 'ws' }) === false)
+                    return;
                 try {
-                    record.socket.write(createWSCloseFrame(CLOSE_POLICY_VIOLATION, 'Rate limit exceeded'));
+                    r.socket.write(createWSCloseFrame(CLOSE_POLICY_VIOLATION, 'Rate limit exceeded'));
                 }
-                catch { /* ignore */ }
-                record.socket.destroy();
-                return;
-            }
-            if (event === 'pong') {
-                record.info.lastPing = Date.now();
-                return;
-            }
-            if (event === 'join-room') {
-                const room = String(data);
-                if (room)
-                    this._joinRoom(record, room);
-                return;
-            }
-            if (event === 'leave-room') {
-                const room = String(data);
-                if (room)
-                    this._leaveRoom(record, room);
+                catch { }
+                r.socket.destroy();
                 return;
             }
             if (msg._ackName && this._acks.has(String(msg._ackName))) {
-                const ackName = String(msg._ackName);
-                const ackHandler = this._acks.get(ackName);
+                const name = String(msg._ackName), h = this._acks.get(name);
+                let res;
                 try {
-                    const result = ackHandler({ ...ctx, data });
-                    if (result !== undefined) {
-                        record.socket.write(createWSTextFrame(JSON.stringify({ event: ackName, data: result, _isAck: true })));
-                        this._totalMessagesSent++;
-                    }
+                    res = h({ ...ctx, data, _correlationId: corrId });
                 }
-                catch (err) {
-                    this.log.error('ACK handler error', { ackName, error: String(err) });
+                catch (e) {
+                    this.log.error('ACK handler error', { name, error: String(e) });
+                    return;
+                }
+                if (res !== undefined) {
+                    const p = { event: name, data: res, _isAck: true };
+                    if (corrId)
+                        p._correlationId = corrId;
+                    try {
+                        r.socket.write(createWSTextFrame(JSON.stringify(p)));
+                        this._totalSent++;
+                    }
+                    catch { }
                 }
                 return;
             }
-            const eventCtx = { ...ctx, data, event };
-            const handler = this.events.get(event);
-            if (handler) {
-                try {
-                    handler(eventCtx);
-                }
-                catch (err) {
-                    this.log.error('Event handler error', { event, error: String(err) });
-                }
-            }
-            if (this._wildcardHandler) {
-                try {
-                    this._wildcardHandler({ event, data: eventCtx });
-                }
-                catch (err) {
-                    this.log.error('Wildcard handler error', { event, error: String(err) });
-                }
-            }
-            return;
+            this._dispatch(r, ctx, event, data, corrId);
         }
         if (opcode === OP_BINARY) {
-            record.info.messagesReceived++;
-            this._totalMessagesReceived++;
-            if (payload.length > this.maxPayloadSize) {
-                if (this.hooks.onPayloadTooLarge) {
-                    this.hooks.onPayloadTooLarge({ clientId: record.info.id, size: payload.length, max: this.maxPayloadSize });
-                }
-                this.log.warn('Binary payload too large', { clientId: record.info.id, size: payload.length });
+            r.info.messagesReceived++;
+            this._totalRecv++;
+            if (payload.length > this.maxPayload) {
+                this.hooks.onPayloadTooLarge?.({ clientId: r.info.id, size: payload.length, max: this.maxPayload });
                 return;
             }
             try {
-                let headerEnd = -1;
-                for (let i = 0; i < payload.length; i++) {
+                let end = -1;
+                for (let i = 0; i < payload.length; i++)
                     if (payload[i] === 0) {
-                        headerEnd = i;
+                        end = i;
                         break;
                     }
-                }
-                if (headerEnd === -1)
+                if (end === -1)
                     return;
-                const headerStr = payload.subarray(0, headerEnd).toString('utf8');
-                const header = JSON.parse(headerStr);
-                const buffer = payload.subarray(headerEnd + 1);
-                if (header.event && !this._checkRateLimit(record.info.id, header.event)) {
-                    this.log.warn('Binary event rate limit exceeded', { clientId: record.info.id, event: header.event });
-                    if (this.hooks.onRateLimitExceeded) {
-                        const result = this.hooks.onRateLimitExceeded({ clientId: record.info.id, event: header.event, protocol: 'ws' });
-                        if (result === false)
-                            return;
-                    }
+                const hdr = JSON.parse(payload.subarray(0, end).toString('utf8'));
+                const buf = payload.subarray(end + 1);
+                if (hdr.event && !this._checkRate(r.info.id, hdr.event)) {
+                    this.log.warn('Binary rate limit', { clientId: r.info.id, event: hdr.event });
+                    if (this.hooks.onRateLimitExceeded?.({ clientId: r.info.id, event: hdr.event, protocol: 'ws' }) === false)
+                        return;
                     return;
                 }
-                const eventCtx = { ...ctx, data: buffer, buffer, isBinary: true, event: header.event };
-                const handler = this.events.get(header.event);
-                if (handler) {
+                const ectx = { ...ctx, data: buf, buffer: buf, isBinary: true, event: hdr.event };
+                const h = this.events.get(hdr.event);
+                if (h)
                     try {
-                        handler(eventCtx);
+                        h(ectx);
                     }
-                    catch (err) {
-                        this.log.error('Binary handler error', { error: String(err) });
-                    }
-                }
-                if (this._wildcardHandler) {
+                    catch { }
+                if (this._wild)
                     try {
-                        this._wildcardHandler({ event: header.event, data: eventCtx });
+                        this._wild({ event: hdr.event, data: ectx });
                     }
-                    catch (err) {
-                        this.log.error('Wildcard handler error', { error: String(err) });
-                    }
-                }
+                    catch { }
             }
             catch {
-                if (this.hooks.onInvalidMessage) {
-                    this.hooks.onInvalidMessage({ clientId: record.info.id, reason: 'Invalid binary frame', protocol: 'ws' });
-                }
-                this.log.warn('Invalid binary frame from client', { clientId: record.info.id });
+                this.hooks.onInvalidMessage?.({ clientId: r.info.id, reason: 'Invalid binary frame', protocol: 'ws' });
             }
         }
     }
-    handleTCPConnection(socket) {
-        const record = this._registerClient(socket, 'tcp', null, new FrameParser(this.maxFrameSize));
-        if (!record)
+    /* ── Private: TCP connection ── */
+    _tcpConnect(socket) {
+        const r = this._register(socket, 'tcp', null, new FrameParser(this.maxFrame));
+        if (!r)
             return;
-        const ctx = this._buildCtx(record, null);
+        const ctx = this._buildCtx(r, null);
         try {
-            socket.write(encodeConnectFrame(record.info.id));
+            socket.write(encodeConnectFrame(r.info.id));
         }
         catch {
             socket.destroy();
             return;
         }
-        if (this.hooks.onClientConnect) {
-            this.hooks.onClientConnect({
-                clientId: record.info.id,
-                ip: record.info.remoteAddress,
-                protocol: 'tcp',
-                metadata: record.info.metadata,
-            });
-        }
-        this.runMiddlewares(ctx, () => {
-            if (this._connectionHandler) {
-                try {
-                    this._connectionHandler(ctx);
-                }
-                catch (err) {
-                    this.log.error('TCP connection handler error', { error: String(err) });
-                }
+        this.hooks.onClientConnect?.({ clientId: r.info.id, ip: r.info.remoteAddress, protocol: 'tcp', metadata: r.info.metadata });
+        this._runMw(ctx, () => { if (this._connH)
+            try {
+                this._connH(ctx);
             }
-        });
-        this.log.info('TCP client connected', { clientId: record.info.id, ip: record.info.remoteAddress });
-        socket.on('data', (data) => {
-            this._processTCPData(record, data, ctx);
-        });
-        socket.on('close', () => {
-            this.log.debug('TCP client socket closed', { clientId: record.info.id });
-            this._unregisterClient(record, ctx);
-        });
-        socket.on('error', (err) => {
-            this.log.warn('TCP client error', { clientId: record.info.id, error: err.message });
-            this._handleError(record, ctx, err);
-        });
-        socket.on('drain', () => {
-            socket.resume();
-        });
+            catch (e) {
+                this.log.error('TCP connection handler error', { error: String(e) });
+            } });
+        this.log.info('TCP connected', { clientId: r.info.id, ip: r.info.remoteAddress });
+        socket.on('data', (d) => this._processTCP(r, d, ctx));
+        socket.on('close', () => this._unregister(r, ctx));
+        socket.on('error', (e) => { this.log.warn('TCP error', { clientId: r.info.id, error: e.message }); this._handleErr(r, ctx, e); });
+        socket.on('drain', () => socket.resume());
     }
-    _processTCPData(record, data, ctx) {
+    _processTCP(r, data, ctx) {
         let frames;
         try {
-            frames = record.parser.feed(data);
+            frames = r.parser.feed(data);
         }
-        catch (err) {
-            if (err instanceof ProtocolError) {
-                this.log.warn('TCP protocol error', { clientId: record.info.id, code: err.code, message: err.message });
+        catch (e) {
+            if (e instanceof ProtocolError) {
+                this.log.warn('TCP protocol error', { code: e.code, message: e.message });
                 try {
-                    record.socket.write(encodeErrorFrame(err.message));
+                    r.socket.write(encodeErrorFrame(e.message));
                 }
-                catch { /* ignore */ }
+                catch { }
             }
-            record.socket.destroy();
+            r.socket.destroy();
             return;
         }
-        for (const frame of frames) {
-            if (record.socket.destroyed)
-                break;
-            this._handleTCPFrame(record, frame, ctx);
+        for (const f of frames) {
+            if (!r.socket.destroyed)
+                this._handleTCPFrame(r, f, ctx);
         }
     }
-    _handleTCPFrame(record, frame, ctx) {
+    _handleTCPFrame(r, frame, ctx) {
         const { type, event, payload } = frame;
         if (type === FRAME_PING) {
             try {
-                record.socket.write(encodePongFrame());
+                r.socket.write(encodePongFrame());
             }
-            catch { /* ignore */ }
-            record.info.lastPing = Date.now();
+            catch { }
+            r.info.lastPing = Date.now();
             return;
         }
         if (type === FRAME_PONG) {
-            record.info.lastPing = Date.now();
+            r.info.lastPing = Date.now();
             return;
         }
-        if (!this._checkRateLimit(record.info.id, event)) {
-            this.log.warn('TCP rate limit exceeded', { clientId: record.info.id, event });
-            if (this.hooks.onRateLimitExceeded) {
-                const result = this.hooks.onRateLimitExceeded({
-                    clientId: record.info.id,
-                    event: event || undefined,
-                    protocol: 'tcp',
-                });
-                if (result === false)
-                    return;
-            }
+        if (type === FRAME_CONNECT)
+            return;
+        if (!this._checkRate(r.info.id, event)) {
+            this.log.warn('TCP rate limit', { clientId: r.info.id, event });
+            if (this.hooks.onRateLimitExceeded?.({ clientId: r.info.id, event: event || undefined, protocol: 'tcp' }) === false)
+                return;
             try {
-                record.socket.write(encodeErrorFrame('Rate limit exceeded'));
+                r.socket.write(encodeErrorFrame('Rate limit exceeded'));
             }
-            catch { /* ignore */ }
-            record.socket.destroy();
+            catch { }
+            r.socket.destroy();
             return;
         }
         if (type === FRAME_JOIN) {
-            const room = payload.toString('utf8');
-            if (room)
-                this._joinRoom(record, room);
+            if (payload.toString('utf8'))
+                this._joinRoom(r, payload.toString('utf8'));
             return;
         }
         if (type === FRAME_LEAVE) {
-            const room = payload.toString('utf8');
-            if (room)
-                this._leaveRoom(record, room);
+            if (payload.toString('utf8'))
+                this._leaveRoom(r, payload.toString('utf8'));
             return;
         }
-        if (type === FRAME_CONNECT) {
+        if (payload.length > this.maxPayload) {
+            this.hooks.onPayloadTooLarge?.({ clientId: r.info.id, event, size: payload.length, max: this.maxPayload });
             return;
         }
-        if (payload.length > this.maxPayloadSize) {
-            if (this.hooks.onPayloadTooLarge) {
-                this.hooks.onPayloadTooLarge({ clientId: record.info.id, event, size: payload.length, max: this.maxPayloadSize });
-            }
-            this.log.warn('TCP payload too large', { clientId: record.info.id, size: payload.length });
-            return;
-        }
-        record.info.messagesReceived++;
-        this._totalMessagesReceived++;
+        r.info.messagesReceived++;
+        this._totalRecv++;
         if (type === FRAME_JSON) {
             let data;
             try {
                 data = JSON.parse(payload.toString('utf8'));
             }
             catch {
-                if (this.hooks.onInvalidMessage) {
-                    this.hooks.onInvalidMessage({ clientId: record.info.id, reason: 'Invalid JSON', protocol: 'tcp' });
-                }
-                this.log.warn('Invalid TCP JSON', { clientId: record.info.id });
+                this.hooks.onInvalidMessage?.({ clientId: r.info.id, reason: 'Invalid JSON', protocol: 'tcp' });
                 return;
             }
-            const eventCtx = { ...ctx, data, event };
-            const handler = this.events.get(event);
-            if (handler) {
-                try {
-                    handler(eventCtx);
-                }
-                catch (err) {
-                    this.log.error('TCP event handler error', { event, error: String(err) });
-                }
-            }
-            if (this._wildcardHandler) {
-                try {
-                    this._wildcardHandler({ event, data: eventCtx });
-                }
-                catch (err) {
-                    this.log.error('TCP wildcard handler error', { error: String(err) });
-                }
-            }
+            this._dispatch(r, ctx, event, data);
             return;
         }
         if (type === FRAME_ACK_REQ) {
@@ -1168,80 +818,74 @@ class StelarServer {
                 try {
                     const parsed = JSON.parse(payload.toString('utf8'));
                     const data = parsed && typeof parsed === 'object' && 'data' in parsed ? parsed.data : parsed;
-                    const ackHandler = this._acks.get(event);
-                    const result = ackHandler({ ...ctx, data });
-                    if (result !== undefined) {
-                        record.socket.write(encodeAckResFrame(event, result, this.maxFrameSize));
-                        this._totalMessagesSent++;
+                    const corrId = parsed && typeof parsed === 'object' && '_correlationId' in parsed ? String(parsed._correlationId) : undefined;
+                    const h = this._acks.get(event);
+                    const res = h({ ...ctx, data, _correlationId: corrId });
+                    if (res !== undefined) {
+                        r.socket.write(corrId ? encodeAckResFrame(event, { data: res, _correlationId: corrId }, this.maxFrame) : encodeAckResFrame(event, res, this.maxFrame));
+                        this._totalSent++;
                     }
                 }
-                catch (err) {
-                    this.log.error('TCP ACK handler error', { event, error: String(err) });
+                catch (e) {
+                    this.log.error('TCP ACK handler error', { event, error: String(e) });
                 }
             }
             return;
         }
         if (type === FRAME_ACK_RES) {
-            if (this._acks.has(event)) {
-                try {
-                    const data = JSON.parse(payload.toString('utf8'));
-                    const ackHandler = this._acks.get(event);
-                    ackHandler({ ...ctx, data });
-                }
-                catch { /* ignore */ }
+            try {
+                const raw = JSON.parse(payload.toString('utf8'));
+                const data = raw && typeof raw === 'object' && 'data' in raw ? raw.data : raw;
+                const corrId = raw && typeof raw === 'object' && '_correlationId' in raw ? String(raw._correlationId) : undefined;
+                const h = this._acks.get(corrId || event);
+                if (h)
+                    try {
+                        h({ ...ctx, data });
+                    }
+                    catch { }
             }
+            catch { }
             return;
         }
         if (type === FRAME_BINARY) {
-            const eventCtx = { ...ctx, data: payload, buffer: payload, isBinary: true, event };
-            const handler = this.events.get(event);
-            if (handler) {
+            const ectx = { ...ctx, data: payload, buffer: payload, isBinary: true, event };
+            const h = this.events.get(event);
+            if (h)
                 try {
-                    handler(eventCtx);
+                    h(ectx);
                 }
-                catch (err) {
-                    this.log.error('TCP binary handler error', { event, error: String(err) });
-                }
-            }
-            if (this._wildcardHandler) {
+                catch { }
+            if (this._wild)
                 try {
-                    this._wildcardHandler({ event, data: eventCtx });
+                    this._wild({ event, data: ectx });
                 }
-                catch (err) {
-                    this.log.error('TCP wildcard handler error', { error: String(err) });
-                }
-            }
-            return;
+                catch { }
         }
     }
-    _handleError(record, ctx, err) {
-        if (this.events.has('error')) {
-            const handler = this.events.get('error');
+    _handleErr(r, ctx, err) {
+        const h = this.events.get('error');
+        if (h)
             try {
-                handler({ ...ctx, error: err, event: 'error' });
+                h({ ...ctx, error: err, event: 'error' });
             }
-            catch (handlerErr) {
-                this.log.error('Error handler threw', { error: String(handlerErr) });
-            }
-        }
+            catch { }
     }
-    _handleHealthCheck(req, res) {
-        if (this._customHealthHandler) {
-            const stats = this.getStats();
+    /* ── Private: health check ── */
+    _health(req, res) {
+        if (this._healthFn) {
             try {
-                this._customHealthHandler(req, res, stats);
+                this._healthFn(req, res, this.getStats());
             }
-            catch (err) {
-                this.log.error('Custom health handler error', { error: String(err) });
+            catch {
                 if (!res.headersSent) {
-                    res.writeHead(500, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ status: 'error', message: 'Health check handler failed' }));
+                    res.writeHead(500);
+                    res.end('{"status":"error"}');
                 }
             }
             return;
         }
         const origin = req.headers['origin'];
-        if (origin && (!this.allowedOrigins || this.allowedOrigins.includes(origin))) {
+        if (origin && (!this.origins || this.origins.includes(origin))) {
             res.setHeader('Access-Control-Allow-Origin', origin);
             res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
             res.setHeader('Access-Control-Max-Age', '86400');
@@ -1251,267 +895,198 @@ class StelarServer {
             res.end();
             return;
         }
-        if (this.healthEndpoint && req.url === this.healthEndpoint && req.method === 'GET') {
-            const stats = this.getStats();
+        if (this.healthPath && req.url === this.healthPath && req.method === 'GET') {
+            const s = this.getStats();
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({
-                status: 'ok',
-                ...stats,
-                uptimeSeconds: Math.floor(stats.uptime / 1000),
-                memoryMB: Math.round(stats.memoryUsage.heapUsed / 1024 / 1024 * 100) / 100,
-            }));
+            res.end(JSON.stringify({ status: 'ok', ...s, uptimeSeconds: Math.floor(s.uptime / 1000), memoryMB: Math.round(s.memoryUsage.heapUsed / 1024 / 1024 * 100) / 100 }));
             return;
         }
         res.writeHead(200, { 'Content-Type': 'text/plain' });
         res.end('Stelar Time Real v3 Server');
     }
-    /** Register a callback for when graceful shutdown completes. */
-    onShutdown(callback) {
-        this._shutdownCallbacks.push(callback);
-        return this;
-    }
-    _emitShutdown(signal, force) {
-        for (const cb of this._shutdownCallbacks) {
-            try {
-                cb(signal, force);
-            }
-            catch { /* ignore */ }
-        }
-        if (this._shutdownCallbacks.length === 0) {
+    /* ── Private: graceful shutdown ── */
+    _emitShutdown(sig, force) {
+        if (!this._shutdownCbs.length) {
             process.exit(force ? 1 : 0);
-        }
-    }
-    _setupGracefulShutdown() {
-        if (!this.doGracefulShutdown)
             return;
-        let isShuttingDown = false;
-        const shutdown = (signal) => {
-            if (isShuttingDown)
+        }
+        for (const cb of this._shutdownCbs)
+            try {
+                cb(sig, force);
+            }
+            catch { }
+    }
+    _setupShutdown() {
+        if (!this.doGraceful)
+            return;
+        let done = false;
+        const shutdown = (sig) => {
+            if (done)
                 return;
-            isShuttingDown = true;
-            this._shuttingDown = true;
-            this.log.info(`Received ${signal}, shutting down gracefully...`);
+            done = true;
+            this._shutting = true;
+            this.log.info(`Received ${sig}, shutting down...`);
             this.stop();
-            const clientCount = this.clients.size;
-            if (clientCount === 0) {
-                this.log.info('No active connections, shutdown complete');
-                this._emitShutdown(signal, false);
+            if (!this.clients.size) {
+                this.log.info('Shutdown complete');
+                this._emitShutdown(sig, false);
                 return;
             }
-            this.log.info(`Waiting for ${clientCount} connections to close (timeout: ${this.shutdownTimeout}ms)`);
-            this.clients.forEach((record) => {
-                try {
-                    if (record.protocol === 'ws') {
-                        record.socket.write(createWSCloseFrame(CLOSE_GOING_AWAY, 'Server shutting down'));
-                    }
-                    else {
-                        record.socket.write(encodeDisconnectFrame());
-                    }
-                    record.socket.end();
-                }
-                catch { /* ignore */ }
-            });
-            const forceTimeout = setTimeout(() => {
-                this.log.warn('Shutdown timeout reached, force closing remaining connections');
-                this.clients.forEach((record) => {
-                    try {
-                        record.socket.destroy();
-                    }
-                    catch { /* ignore */ }
-                });
-                this.clients.clear();
-                this.clientsById.clear();
-                this._emitShutdown(signal, true);
-            }, this.shutdownTimeout);
-            forceTimeout.unref();
-            const checkInterval = setInterval(() => {
-                if (this.clients.size === 0) {
-                    clearInterval(checkInterval);
-                    clearTimeout(forceTimeout);
-                    this.log.info('All connections closed, shutdown complete');
-                    this._emitShutdown(signal, false);
-                }
-            }, 100);
-            checkInterval.unref();
+            this.log.info(`Waiting for ${this.clients.size} connections (timeout: ${this.shutdownMs}ms)`);
+            this.clients.forEach(r => { try {
+                r.socket.write(r.protocol === 'ws' ? createWSCloseFrame(CLOSE_GOING_AWAY, 'Shutting down') : encodeDisconnectFrame());
+                r.socket.end();
+            }
+            catch { } });
+            const forceT = setTimeout(() => { this.clients.forEach(r => { try {
+                r.socket.destroy();
+            }
+            catch { } }); this.clients.clear(); this.byId.clear(); this._emitShutdown(sig, true); }, this.shutdownMs);
+            forceT.unref();
+            const check = setInterval(() => { if (!this.clients.size) {
+                clearInterval(check);
+                clearTimeout(forceT);
+                this._emitShutdown(sig, false);
+            } }, 100);
+            check.unref();
         };
-        this._sigintHandler = () => shutdown('SIGINT');
-        this._sigtermHandler = () => shutdown('SIGTERM');
-        process.on('SIGINT', this._sigintHandler);
-        process.on('SIGTERM', this._sigtermHandler);
+        this._sigH.int = () => shutdown('SIGINT');
+        this._sigH.term = () => shutdown('SIGTERM');
+        process.on('SIGINT', this._sigH.int);
+        process.on('SIGTERM', this._sigH.term);
     }
-    _removeSignalHandlers() {
-        if (this._sigintHandler) {
-            process.off('SIGINT', this._sigintHandler);
-            this._sigintHandler = null;
+    _removeSignals() {
+        if (this._sigH.int) {
+            process.off('SIGINT', this._sigH.int);
+            this._sigH.int = null;
         }
-        if (this._sigtermHandler) {
-            process.off('SIGTERM', this._sigtermHandler);
-            this._sigtermHandler = null;
+        if (this._sigH.term) {
+            process.off('SIGTERM', this._sigH.term);
+            this._sigH.term = null;
         }
     }
-    start(callback) {
+    /* ── Start / Stop ── */
+    start(cb) {
         if (this._started) {
-            const port = this.getPort();
-            if (callback)
-                callback(port);
-            return Promise.resolve(port);
+            const p = this.getPort();
+            cb?.(p);
+            return Promise.resolve(p);
         }
         this._started = true;
         this._startTime = Date.now();
-        return new Promise((resolve) => {
-            const startHttpServer = (httpServer) => {
-                this.httpServer = httpServer;
-                this._requestHandler = (req, res) => {
-                    this._handleHealthCheck(req, res);
-                };
-                httpServer.on('request', this._requestHandler);
-                this._upgradeHandler = (req, socket, head) => {
-                    this.handleWSUpgrade(req, socket, head);
-                };
-                httpServer.on('upgrade', this._upgradeHandler);
-                this.startHeartbeat();
-                this._rateCleanupTimer = setInterval(() => {
-                    if (this._customRateLimiter) {
-                        this._customRateLimiter.cleanup();
+        return new Promise(resolve => {
+            const onHttp = (srv) => {
+                this.httpServer = srv;
+                this._reqH = (req, res) => this._health(req, res);
+                this._upgH = (req, socket, head) => this._wsUpgrade(req, socket, head);
+                srv.on('request', this._reqH);
+                srv.on('upgrade', this._upgH);
+                this._startHeartbeat();
+                this._rc = setInterval(() => {
+                    if (this._crl)
+                        this._crl.cleanup();
+                    else
+                        this.rateLimiter?.cleanup();
+                    (this._cit || this.ipTracker).cleanup();
+                    for (const [id, l] of this.clientRates) {
+                        l.cleanup();
+                        if (!this.byId.has(id))
+                            this.clientRates.delete(id);
                     }
-                    else if (this.rateLimiter) {
-                        this.rateLimiter.cleanup();
-                    }
-                    const ipTracker = this._customIPTracker || this.ipTracker;
-                    ipTracker.cleanup();
-                    for (const [clientId, limiter] of this._clientRateOverrides) {
-                        limiter.cleanup();
-                        if (!this.clientsById.has(clientId)) {
-                            this._clientRateOverrides.delete(clientId);
-                        }
-                    }
-                    for (const [, limiter] of this.eventRateLimiters) {
-                        limiter.cleanup();
-                    }
+                    for (const [, l] of this.evRateLimits)
+                        l.cleanup();
                 }, 30000);
-                if (this._rateCleanupTimer && typeof this._rateCleanupTimer === 'object' && 'unref' in this._rateCleanupTimer) {
-                    this._rateCleanupTimer.unref();
-                }
-                this._setupGracefulShutdown();
-                const finalPort = this.getPort();
-                this.log.info('Server started', { port: finalPort, namespace: this.namespace, tls: !!this.tlsOptions });
-                if (callback)
-                    callback(finalPort);
-                resolve(finalPort);
+                this._rc?.unref?.();
+                this._setupShutdown();
+                const p = this.getPort();
+                this.log.info('Server started', { port: p, namespace: this.ns, tls: !!this.tlsOpts });
+                cb?.(p);
+                resolve(p);
             };
             if (this.httpServer) {
-                this._externalServers.add(this.httpServer);
-                startHttpServer(this.httpServer);
+                this._ext.add(this.httpServer);
+                onHttp(this.httpServer);
             }
             else {
                 const tryListen = (port) => {
-                    const httpServer = this.tlsOptions
-                        ? createHttpServer()
-                        : createHttpServer();
-                    httpServer.on('error', (err) => {
-                        if (err.code === 'EADDRINUSE' && port < 65535) {
-                            tryListen(port + 1);
-                        }
-                        else {
-                            this.log.error('HTTP server error', { error: err.message });
-                        }
-                    });
-                    httpServer.listen(port, () => {
-                        this.port = port;
-                        startHttpServer(httpServer);
-                    });
+                    const srv = createHttp();
+                    srv.on('error', (e) => { if (e.code === 'EADDRINUSE' && port < 65535)
+                        tryListen(port + 1);
+                    else
+                        this.log.error('HTTP error', { error: e.message }); });
+                    srv.listen(port, () => { this.port = port; onHttp(srv); });
                 };
                 tryListen(this.port);
             }
             if (this.tcpPort !== false) {
-                const tcpPortNum = typeof this.tcpPort === 'number' ? this.tcpPort : this.port + 1;
-                this._startTCPServer(tcpPortNum);
+                const p = typeof this.tcpPort === 'number' ? this.tcpPort : this.port + 1;
+                this._startTCP(p);
             }
         });
     }
-    _startTCPServer(port, attempts = 0) {
-        const tcpHandler = (socket) => this.handleTCPConnection(socket);
-        if (this.tlsOptions) {
-            try {
-                const tlsServer = createTlsServer(this.tlsOptions, tcpHandler);
-                this.tcpServer = tlsServer;
-                this.tcpServer.on('error', (err) => {
-                    if (err.code === 'EADDRINUSE' && attempts < 10) {
-                        this.log.info(`TLS TCP port ${port} in use, trying ${port + 1}`);
-                        this.tcpServer = null;
-                        this._startTCPServer(port + 1, attempts + 1);
-                    }
-                    else {
-                        this.log.error('TLS TCP server error', { error: err.message });
-                    }
-                });
-                this.tcpServer.listen(port, () => {
-                    this.log.info('TLS TCP server started', { port });
-                });
-            }
-            catch (err) {
-                this.log.error('Failed to create TLS TCP server', { error: String(err) });
-                this._startPlainTCPServer(port, attempts, tcpHandler);
-            }
-        }
-        else {
-            this._startPlainTCPServer(port, attempts, tcpHandler);
-        }
-    }
-    _startPlainTCPServer(port, attempts, tcpHandler) {
-        this.tcpServer = createTcpServer(tcpHandler);
-        this.tcpServer.on('error', (err) => {
-            if (err.code === 'EADDRINUSE' && attempts < 10) {
-                this.log.info(`TCP port ${port} in use, trying ${port + 1}`);
+    _startTCP(port, attempts = 0) {
+        const handler = (s) => this._tcpConnect(s);
+        const startPlain = (p, a) => {
+            const srv = createTcp(handler);
+            srv.on('error', (e) => { if (e.code === 'EADDRINUSE' && a < 10) {
                 this.tcpServer = null;
-                this._startTCPServer(port + 1, attempts + 1);
+                this._startTCP(p + 1, a + 1);
             }
-            else {
-                this.log.error('TCP server error', { error: err.message });
+            else
+                this.log.error('TCP error', { error: e.message }); });
+            srv.listen(p, () => { this.tcpServer = srv; this.log.info('TCP started', { port: p }); });
+        };
+        if (this.tlsOpts) {
+            try {
+                const srv = createTls(this.tlsOpts, handler);
+                this.tcpServer = srv;
+                this.tcpServer.on('error', (e) => { if (e.code === 'EADDRINUSE' && attempts < 10) {
+                    this.tcpServer = null;
+                    this._startTCP(port + 1, attempts + 1);
+                }
+                else
+                    this.log.error('TLS TCP error', { error: e.message }); });
+                this.tcpServer.listen(port, () => this.log.info('TLS TCP started', { port }));
             }
-        });
-        this.tcpServer.listen(port, () => {
-            this.log.info('TCP server started', { port });
-        });
+            catch {
+                startPlain(port, attempts);
+            }
+        }
+        else
+            startPlain(port, attempts);
     }
     stop() {
-        if (this._hbTimer) {
-            clearInterval(this._hbTimer);
-            this._hbTimer = null;
+        if (this._hb) {
+            clearInterval(this._hb);
+            this._hb = null;
         }
-        if (this._rateCleanupTimer) {
-            clearInterval(this._rateCleanupTimer);
-            this._rateCleanupTimer = null;
+        if (this._rc) {
+            clearInterval(this._rc);
+            this._rc = null;
         }
-        this.clients.forEach((record) => {
-            if (!record.socket.destroyed) {
-                record.socket.destroy();
-            }
-        });
+        this.clients.forEach(r => { if (!r.socket.destroyed)
+            r.socket.destroy(); });
         this.clients.clear();
-        this.clientsById.clear();
+        this.byId.clear();
         this.rooms.clear();
-        this._clientRateOverrides.clear();
+        this.clientRates.clear();
         if (this.httpServer) {
-            if (this._upgradeHandler) {
-                this.httpServer.off('upgrade', this._upgradeHandler);
-                this._upgradeHandler = null;
-            }
-            if (this._requestHandler) {
-                this.httpServer.off('request', this._requestHandler);
-                this._requestHandler = null;
-            }
-            if (!this._externalServers.has(this.httpServer)) {
+            if (this._upgH)
+                this.httpServer.off('upgrade', this._upgH);
+            if (this._reqH)
+                this.httpServer.off('request', this._reqH);
+            if (!this._ext.has(this.httpServer))
                 this.httpServer.close();
-            }
             this.httpServer = null;
+            this._upgH = null;
+            this._reqH = null;
         }
         if (this.tcpServer) {
             this.tcpServer.close();
             this.tcpServer = null;
         }
         this._started = false;
-        this._removeSignalHandlers();
+        this._removeSignals();
         this.log.info('Server stopped');
         return this;
     }

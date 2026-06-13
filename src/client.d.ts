@@ -1,44 +1,34 @@
 /**
- * @stelar-time-real Client
- *
- * Dual-environment: Browser (native WebSocket) + Node.js (manual WS or TCP binary).
- * No external dependencies.
+ * @stelar-time-real Client — Browser WS / Node WS / binary TCP
  */
 import { Logger, type LogLevel } from './logger.js';
 export interface StelarClientHooks {
-    /** Return false to cancel the emit. */
-    onBeforeEmit?: (info: {
+    onBeforeEmit?: (i: {
         event: string;
         data: unknown;
     }) => boolean | void;
-    /** Called on every incoming message. */
-    onMessage?: (info: {
+    onMessage?: (i: {
         event: string;
         data: unknown;
         isBinary: boolean;
     }) => void;
-    /** Called when connection state changes. */
-    onStateChange?: (info: {
+    onStateChange?: (i: {
         from: ConnectionState;
         to: ConnectionState;
     }) => void;
-    /** Return a custom delay (ms) to override built-in backoff. */
-    onReconnectDelay?: (info: {
+    onReconnectDelay?: (i: {
         attempt: number;
         defaultDelay: number;
     }) => number | void;
-    /** Called when a message is queued while disconnected. */
-    onMessageQueued?: (info: {
+    onMessageQueued?: (i: {
         event: string;
         data: unknown;
         queueSize: number;
     }) => void;
-    /** Called after queued messages are flushed on reconnection. */
-    onQueueDrained?: (info: {
+    onQueueDrained?: (i: {
         count: number;
     }) => void;
-    /** Called on any client-side error. */
-    onError?: (info: {
+    onError?: (i: {
         error: Error;
         context: string;
     }) => void;
@@ -58,39 +48,40 @@ export interface StelarClientOptions {
     tls?: boolean;
     rejectUnauthorized?: boolean;
     headers?: Record<string, string>;
-    /** Custom backoff function: (attempt, baseDelay, maxDelay) => delayMs */
     customReconnectDelay?: (attempt: number, baseDelay: number, maxDelay: number) => number;
     hooks?: StelarClientHooks;
 }
 export interface StelarEmitOptions {
     ack?: string;
+    _correlationId?: string;
 }
 export type StelarEventHandler = (data: unknown) => void;
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
 declare class StelarClient {
     private url;
-    private options;
+    private opts;
     private events;
-    private _wildcardHandler;
+    private _wild;
     private _acks;
     private _state;
-    private _reconnectAttempts;
-    private _hbTimer;
-    private _isManualClose;
+    private _reconnAttempts;
+    private _hb;
+    private _manualClose;
     private id;
-    private _messageQueue;
-    private _reconnectTimer;
-    private _messagesSent;
-    private _messagesReceived;
-    private _connectTime;
-    private _lastError;
+    private _mq;
+    private _reconnTimer;
+    private _ackCounter;
+    private _sent;
+    private _recv;
+    private _connTime;
+    private _lastErr;
     private _ws;
-    private _nodeSocket;
+    private _nodeSock;
     private _wsParser;
-    private _tcpSocket;
+    private _tcpSock;
     private _tcpParser;
     private log;
-    constructor(urlOrPort?: string | number, options?: StelarClientOptions);
+    constructor(urlOrPort?: string | number, o?: StelarClientOptions);
     getState(): ConnectionState;
     getId(): string | null;
     getUrl(): string;
@@ -99,10 +90,8 @@ declare class StelarClient {
     getLastError(): Error | null;
     getQueueSize(): number;
     getConnectTime(): number;
-    setUrl(url: string): this;
-    /** Update client options at runtime. Changes take effect immediately. */
-    updateOptions(options: Partial<StelarClientOptions>): this;
-    /** Read-only snapshot of current client options. */
+    setUrl(u: string): this;
+    updateOptions(o: Partial<StelarClientOptions>): this;
     getOptions(): Readonly<{
         reconnection: boolean;
         reconnectionAttempts: number;
@@ -110,50 +99,49 @@ declare class StelarClient {
         maxReconnectionDelay: number;
         heartbeatInterval: number;
         ackTimeout: number;
-        mode: string;
+        mode: "ws" | "tcp";
         maxPayloadSize: number;
         messageQueueSize: number;
         hasCustomReconnectDelay: boolean;
         hooks: string[];
     }>;
-    on(event: string, handler: StelarEventHandler): this;
-    off(event: string, handler: StelarEventHandler): this;
-    once(event: string, handler: StelarEventHandler): this;
-    onAll(handler: (data: {
+    on(ev: string, h: StelarEventHandler): this;
+    off(ev: string, h: StelarEventHandler): this;
+    once(ev: string, h: StelarEventHandler): this;
+    onAll(h: (d: {
         event: string;
         data: unknown;
         isBinary?: boolean;
         buffer?: ArrayBuffer;
     }) => void): this;
-    onAck(name: string, handler: StelarEventHandler): this;
-    removeAllListeners(event?: string): this;
+    onAck(name: string, h: StelarEventHandler): this;
+    removeAllListeners(ev?: string): this;
     emit(event: string, data?: unknown, opts?: StelarEmitOptions): this;
     emitBinary(event: string, data: ArrayBuffer): this;
-    sendFile(file: ArrayBuffer): this;
-    sendImage(blob: ArrayBuffer): this;
-    /** Send a request and wait for an ACK response. Rejects on timeout. */
+    sendFile(f: ArrayBuffer): this;
+    sendImage(b: ArrayBuffer): this;
     request(event: string, data: unknown, ackName: string): Promise<unknown>;
     joinRoom(room: string): this;
     leaveRoom(room: string): this;
-    private startHeartbeat;
-    private stopHeartbeat;
-    private _getReconnectDelay;
-    private _drainQueue;
-    private _setState;
-    private _cleanupAcks;
-    private _fullCleanup;
-    connect(callback?: () => void): this;
+    connect(cb?: () => void): this;
     disconnect(): this;
     isConnected(): boolean;
+    private _setState;
+    private _startHB;
+    private _stopHB;
+    private _getDelay;
+    private _drain;
+    private _cleanupAcks;
+    private _fullCleanup;
+    private _tryReconnect;
+    private _onConnected;
     private _connectBrowser;
-    private _handleBrowserMessage;
+    private _handleBrowserMsg;
     private _connectNodeWS;
-    private _processNodeWSData;
-    private _handleNodeWSFrame;
-    /** TCP mode: connects to WS port + 1 by convention. */
+    private _processNodeWS;
+    private _handleNodeFrame;
     private _connectTCP;
     private _handleTCPFrame;
-    private _tryReconnect;
 }
 export default StelarClient;
 //# sourceMappingURL=client.d.ts.map

@@ -1,101 +1,78 @@
 /**
- * @stelar-time-real Server
- *
- * Dual-protocol real-time server: WebSocket (RFC 6455) + custom binary TCP.
- * Zero external dependencies — uses only Node.js built-in modules.
+ * @stelar-time-real Server — Dual-protocol: WebSocket (RFC 6455) + binary TCP
  */
 import { IncomingMessage, Server as HttpServer, ServerResponse } from 'http';
 import { Socket as NetSocket } from 'net';
-import type { TlsOptions } from 'tls';
+import { TlsOptions } from 'tls';
 import { Logger, type LogLevel } from './logger.js';
 export interface IRateLimiter {
-    /** Returns true if the action is allowed */
     check(id: string, cost?: number): boolean;
-    /** Reset rate limit for a specific client */
     reset(id: string): void;
-    /** Clean up expired entries */
     cleanup(): void;
-    /** Number of tracked entries */
     size(): number;
 }
 export interface IIPTracker {
-    /** Returns true if connection from this IP is allowed */
     check(ip: string): boolean;
-    /** Register a new connection from this IP */
     add(ip: string): void;
-    /** Unregister a connection from this IP */
     remove(ip: string): void;
-    /** Get current connection count for this IP */
     getCount(ip: string): number;
-    /** Clean up stale entries */
     cleanup(): void;
 }
 export interface StelarHooks {
-    /** Called when a client exceeds rate limit. Return false to skip disconnect. */
-    onRateLimitExceeded?: (info: {
+    onRateLimitExceeded?: (i: {
         clientId: string;
         event?: string;
         protocol: 'ws' | 'tcp';
     }) => boolean | void;
-    /** Called when max connections is reached. */
-    onMaxConnectionsReached?: (info: {
+    onMaxConnectionsReached?: (i: {
         activeConnections: number;
         max: number;
         ip: string;
     }) => void;
-    /** Called when global max rooms is reached. Return false to reject room creation. */
-    onMaxRoomsReached?: (info: {
+    onMaxRoomsReached?: (i: {
         clientId: string;
         room: string;
         totalRooms: number;
         max: number;
     }) => boolean | void;
-    /** Called when per-client max rooms is reached. Return false to reject join. */
-    onMaxRoomsPerClientReached?: (info: {
+    onMaxRoomsPerClientReached?: (i: {
         clientId: string;
         room: string;
         currentRooms: number;
         max: number;
     }) => boolean | void;
-    /** Called when a payload exceeds maxPayloadSize. */
-    onPayloadTooLarge?: (info: {
+    onPayloadTooLarge?: (i: {
         clientId: string;
         event?: string;
         size: number;
         max: number;
     }) => void;
-    /** Called when a client sends an invalid message. */
-    onInvalidMessage?: (info: {
+    onInvalidMessage?: (i: {
         clientId: string;
         reason: string;
         protocol: 'ws' | 'tcp';
     }) => void;
-    /** Called before a client joins a room. Return false to reject. */
-    onClientJoinRoom?: (info: {
+    onClientJoinRoom?: (i: {
         clientId: string;
         room: string;
         metadata: Map<string, unknown>;
     }) => boolean | void;
-    /** Called before a client leaves a room. Return false to reject. */
-    onClientLeaveRoom?: (info: {
+    onClientLeaveRoom?: (i: {
         clientId: string;
         room: string;
     }) => boolean | void;
-    /** Called before a broadcast. Return false to cancel. */
-    onBeforeBroadcast?: (info: {
+    onBeforeBroadcast?: (i: {
         event: string;
         data: unknown;
         excludeId?: string;
     }) => boolean | void;
-    /** Called when a new client connects. */
-    onClientConnect?: (info: {
+    onClientConnect?: (i: {
         clientId: string;
         ip: string;
         protocol: 'ws' | 'tcp';
         metadata: Map<string, unknown>;
     }) => void;
-    /** Called when a client disconnects. */
-    onClientDisconnect?: (info: {
+    onClientDisconnect?: (i: {
         clientId: string;
         ip: string;
         protocol: 'ws' | 'tcp';
@@ -117,7 +94,6 @@ export interface StelarOptions {
     maxConnectionsPerIP?: number;
     maxRooms?: number;
     maxRoomsPerClient?: number;
-    maxEventNameLength?: number;
     maxPayloadSize?: number;
     maxFrameSize?: number;
     rateLimit?: {
@@ -131,17 +107,11 @@ export interface StelarOptions {
     logger?: Logger | LogLevel | false;
     tls?: TlsOptions;
     allowedOrigins?: string[];
-    /** Custom rate limiter implementation. Replaces the built-in token bucket. */
     customRateLimiter?: IRateLimiter;
-    /** Custom IP connection tracker. Replaces the built-in per-IP counter. */
     customIPTracker?: IIPTracker;
-    /** Custom function to generate client IDs. Defaults to UUID v4. */
     generateClientId?: () => string;
-    /** Per-event rate limits. Each event can have different maxPoints and windowMs. */
     eventRateLimits?: EventRateLimits;
-    /** Hook callbacks for server events. */
     hooks?: StelarHooks;
-    /** Custom health check handler. Receives (req, res, stats). */
     customHealthHandler?: (req: IncomingMessage, res: ServerResponse, stats: StelarStats) => void;
 }
 export interface StelarClientInfo {
@@ -164,6 +134,7 @@ export interface StelarContext {
     isBinary?: boolean;
     event?: string;
     error?: Error;
+    _correlationId?: string;
     clientInfo: StelarClientInfo;
     emit: (event: string, data: unknown) => void;
     send: (respId: string, data: unknown) => void;
@@ -206,75 +177,69 @@ declare class StelarServer {
     private port;
     private httpServer;
     private tcpServer;
-    private namespace;
-    private heartbeatInterval;
-    private heartbeatTimeout;
+    private ns;
+    private hbInterval;
+    private hbTimeout;
     private tcpPort;
-    private maxConnections;
+    private maxConns;
     private maxRooms;
     private maxRoomsPerClient;
-    private maxPayloadSize;
-    private maxFrameSize;
-    private maxWSFrameSize;
-    private connectTimeout;
-    private doGracefulShutdown;
-    private shutdownTimeout;
-    private healthEndpoint;
-    private tlsOptions;
-    private allowedOrigins;
-    private _customRateLimiter;
-    private _customIPTracker;
-    private _generateClientId;
-    private _customHealthHandler;
+    private maxPayload;
+    private maxFrame;
+    private maxWSFrame;
+    private connTimeout;
+    private doGraceful;
+    private shutdownMs;
+    private healthPath;
+    private tlsOpts;
+    private origins;
+    private _crl;
+    private _cit;
+    private _genId;
+    private _healthFn;
     private hooks;
-    private eventRateLimiters;
-    private _clientRateOverrides;
+    private evRateLimits;
+    private clientRates;
     private clients;
-    private clientsById;
+    private byId;
     private rooms;
     private events;
-    private middlewares;
-    private _hbTimer;
-    private _rateCleanupTimer;
-    private _wildcardHandler;
-    private _connectionHandler;
+    private mw;
+    private _hb;
+    private _rc;
+    private _wild;
+    private _connH;
     private _acks;
-    private _externalServers;
-    private _upgradeHandler;
-    private _requestHandler;
+    private _ext;
+    private _upgH;
+    private _reqH;
     private _started;
     private _startTime;
-    private _shuttingDown;
-    private _sigintHandler;
-    private _sigtermHandler;
+    private _shutting;
+    private _sigH;
     private rateLimiter;
     private ipTracker;
-    private _totalConnections;
-    private _totalMessagesReceived;
-    private _totalMessagesSent;
+    private _totalConns;
+    private _totalRecv;
+    private _totalSent;
+    private _shutdownCbs;
     private log;
-    constructor(options?: StelarOptions);
-    static of(path: string, options?: StelarOptions): StelarServer;
-    /** Update server configuration at runtime. */
-    updateConfig(options: Partial<StelarOptions>): this;
-    /** Set a per-client rate limit override. */
-    setClientRateLimit(clientId: string, config: {
+    constructor(o?: StelarOptions);
+    static of(path: string, o?: StelarOptions): StelarServer;
+    updateConfig(o: Partial<StelarOptions>): this;
+    setClientRateLimit(id: string, c: {
         maxPoints: number;
         windowMs: number;
     }): this;
-    /** Remove a per-client rate limit override, falling back to the global limiter. */
-    removeClientRateLimit(clientId: string): this;
-    /** Set a per-event rate limit. */
-    setEventRateLimit(event: string, config: {
+    removeClientRateLimit(id: string): this;
+    setEventRateLimit(ev: string, c: {
         maxPoints: number;
         windowMs: number;
     }): this;
-    /** Remove a per-event rate limit. */
-    removeEventRateLimit(event: string): this;
-    /** Get the current server configuration as a read-only object. */
+    removeEventRateLimit(ev: string): this;
     getConfig(): Readonly<{
         maxConnections: number;
-        maxConnectionsPerIP: number;
+        maxConnectionsPerIP: -1 | 50;
         maxRooms: number;
         maxRoomsPerClient: number;
         maxPayloadSize: number;
@@ -290,14 +255,14 @@ declare class StelarServer {
         hooks: string[];
         allowedOrigins: string[] | null;
     }>;
-    use(middleware: StelarMiddleware): this;
-    on(event: string, handler: StelarEventHandler): this;
-    onAll(handler: StelarWildcardHandler): this;
-    onConnection(handler: StelarEventHandler): this;
-    onDisconnect(handler: StelarEventHandler): this;
-    onAck(name: string, handler: StelarEventHandler): this;
+    use(mw: StelarMiddleware): this;
+    on(ev: string, h: StelarEventHandler): this;
+    onAll(h: StelarWildcardHandler): this;
+    onConnection(h: StelarEventHandler): this;
+    onDisconnect(h: StelarEventHandler): this;
+    onAck(name: string, h: StelarEventHandler): this;
     broadcast(event: string, data: unknown, excludeId?: string): this;
-    broadcastBinary(event: string, buffer: ArrayBuffer): void;
+    broadcastBinary(event: string, buf: ArrayBuffer): void;
     to(room: string, event: string, data: unknown, excludeId?: string): this;
     toId(id: string, event: string, data: unknown): this;
     getClients(room?: string): {
@@ -308,38 +273,33 @@ declare class StelarServer {
     getRooms(): string[];
     getPort(): number;
     getStats(): StelarStats;
-    private _getRateLimiterSize;
-    /** Check rate limit. Priority: per-client override > event-specific > custom/global. */
-    private _checkRateLimit;
-    private _sendJsonToClient;
-    private _sendBinaryRaw;
+    onShutdown(cb: (sig: string, force: boolean) => void): this;
+    private _sendJson;
+    private _write;
+    private _sendBin;
+    private _checkRate;
+    private _getIP;
+    private _register;
+    private _unregister;
     private _joinRoom;
     private _leaveRoom;
-    private _removeFromAllRooms;
     private _buildCtx;
-    private runMiddlewares;
-    private startHeartbeat;
-    private _getClientIP;
-    private _registerClient;
-    private _unregisterClient;
-    private _checkOrigin;
-    private handleWSUpgrade;
-    private _processWSData;
+    private _runMw;
+    private _dispatch;
+    private _startHeartbeat;
+    private _wsUpgrade;
+    private _processWS;
     private _handleWSFrame;
-    private handleTCPConnection;
-    private _processTCPData;
+    private _tcpConnect;
+    private _processTCP;
     private _handleTCPFrame;
-    private _handleError;
-    private _handleHealthCheck;
-    private _shutdownCallbacks;
-    /** Register a callback for when graceful shutdown completes. */
-    onShutdown(callback: (signal: string, force: boolean) => void): this;
+    private _handleErr;
+    private _health;
     private _emitShutdown;
-    private _setupGracefulShutdown;
-    private _removeSignalHandlers;
-    start(callback?: (port: number) => void): Promise<number>;
-    private _startTCPServer;
-    private _startPlainTCPServer;
+    private _setupShutdown;
+    private _removeSignals;
+    start(cb?: (port: number) => void): Promise<number>;
+    private _startTCP;
     stop(): this;
 }
 export default StelarServer;
