@@ -1,6 +1,4 @@
-/**
- * @stelar-time-real Client — Browser WS / Node WS / binary TCP
- */
+/** @stelar-time-real Client — Browser WS / Node WS / binary TCP */
 import { Logger, type LogLevel } from './logger.js';
 export interface StelarClientHooks {
     onBeforeEmit?: (i: {
@@ -48,6 +46,7 @@ export interface StelarClientOptions {
     tls?: boolean;
     rejectUnauthorized?: boolean;
     headers?: Record<string, string>;
+    compression?: boolean;
     customReconnectDelay?: (attempt: number, baseDelay: number, maxDelay: number) => number;
     hooks?: StelarClientHooks;
 }
@@ -80,6 +79,10 @@ declare class StelarClient {
     private _wsParser;
     private _tcpSock;
     private _tcpParser;
+    private _compress;
+    private _serverCompress;
+    private _writePaused;
+    private _writeQueue;
     private log;
     constructor(urlOrPort?: string | number, o?: StelarClientOptions);
     getState(): ConnectionState;
@@ -102,6 +105,7 @@ declare class StelarClient {
         mode: "ws" | "tcp";
         maxPayloadSize: number;
         messageQueueSize: number;
+        compression: boolean;
         hasCustomReconnectDelay: boolean;
         hooks: string[];
     }>;
@@ -135,6 +139,9 @@ declare class StelarClient {
     private _fullCleanup;
     private _tryReconnect;
     private _onConnected;
+    private _writeTCP;
+    private _writeNodeWS;
+    private _flushQueue;
     private _connectBrowser;
     private _handleBrowserMsg;
     private _connectNodeWS;

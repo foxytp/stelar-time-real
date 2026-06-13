@@ -13,7 +13,6 @@ export declare class Logger {
     private color;
     constructor(o?: LoggerOptions);
     setLevel(l: LogLevel): this;
-    private fmt;
     private w;
     debug(m: string, meta?: Record<string, unknown>): void;
     info(m: string, meta?: Record<string, unknown>): void;

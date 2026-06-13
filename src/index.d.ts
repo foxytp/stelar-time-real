@@ -1,6 +1,4 @@
-/**
- * @stelar-time-real Server — Dual-protocol: WebSocket (RFC 6455) + binary TCP
- */
+/** @stelar-time-real Server — Dual-protocol: WebSocket (RFC 6455) + binary TCP */
 import { IncomingMessage, Server as HttpServer, ServerResponse } from 'http';
 import { Socket as NetSocket } from 'net';
 import { TlsOptions } from 'tls';
@@ -113,6 +111,7 @@ export interface StelarOptions {
     eventRateLimits?: EventRateLimits;
     hooks?: StelarHooks;
     customHealthHandler?: (req: IncomingMessage, res: ServerResponse, stats: StelarStats) => void;
+    compression?: boolean;
 }
 export interface StelarClientInfo {
     id: string;
@@ -200,12 +199,12 @@ declare class StelarServer {
     private hooks;
     private evRateLimits;
     private clientRates;
+    private doCompress;
     private clients;
     private byId;
     private rooms;
     private events;
     private mw;
-    private _hb;
     private _rc;
     private _wild;
     private _connH;
@@ -247,6 +246,7 @@ declare class StelarServer {
         heartbeatTimeout: number;
         connectTimeout: number;
         shutdownTimeout: number;
+        compression: boolean;
         hasCustomRateLimiter: boolean;
         hasCustomIPTracker: boolean;
         hasCustomClientIdGenerator: boolean;
@@ -274,11 +274,14 @@ declare class StelarServer {
     getPort(): number;
     getStats(): StelarStats;
     onShutdown(cb: (sig: string, force: boolean) => void): this;
-    private _sendJson;
     private _write;
+    private _sendJson;
     private _sendBin;
+    private _flushQueue;
     private _checkRate;
     private _getIP;
+    private _startClientHB;
+    private _stopClientHB;
     private _register;
     private _unregister;
     private _joinRoom;
@@ -286,7 +289,6 @@ declare class StelarServer {
     private _buildCtx;
     private _runMw;
     private _dispatch;
-    private _startHeartbeat;
     private _wsUpgrade;
     private _processWS;
     private _handleWSFrame;

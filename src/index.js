@@ -1,13 +1,35 @@
-/**
- * @stelar-time-real Server — Dual-protocol: WebSocket (RFC 6455) + binary TCP
- */
+/** @stelar-time-real Server — Dual-protocol: WebSocket (RFC 6455) + binary TCP */
 import { createServer as createHttp } from 'http';
 import { createServer as createTcp } from 'net';
 import { randomUUID } from 'crypto';
 import { createServer as createTls } from 'tls';
-import { FrameParser, encodeJsonFrame, encodeBinaryFrame, encodePingFrame, encodePongFrame, encodeAckResFrame, encodeConnectFrame, encodeDisconnectFrame, encodeErrorFrame, FRAME_JSON, FRAME_BINARY, FRAME_PING, FRAME_PONG, FRAME_ACK_REQ, FRAME_ACK_RES, FRAME_JOIN, FRAME_LEAVE, FRAME_CONNECT, ProtocolError, DEFAULT_MAX_FRAME_SIZE, } from './protocol.js';
-import { WSFrameParser, buildUpgradeResponse, validateWSKey, createWSTextFrame, createWSBinaryFrame, createWSCloseFrame, createWSPingFrame, createWSPongFrame, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG, WebSocketError, CLOSE_POLICY_VIOLATION, CLOSE_MESSAGE_TOO_BIG, CLOSE_GOING_AWAY, DEFAULT_MAX_WS_FRAME_SIZE, } from './websocket.js';
+import { FrameParser, encodeJsonFrame, encodeBinaryFrame, encodePingFrame, encodePongFrame, encodeAckResFrame, encodeConnectFrame, encodeDisconnectFrame, encodeErrorFrame, FRAME_JSON, FRAME_BINARY, FRAME_PING, FRAME_PONG, FRAME_ACK_REQ, FRAME_JOIN, FRAME_LEAVE, FRAME_CONNECT, ProtocolError, DEFAULT_MAX_FRAME_SIZE, } from './protocol.js';
+import { WSFrameParser, buildUpgradeResponse, validateWSKey, createWSTextFrame, createWSBinaryFrame, createWSCloseFrame, createWSPingFrame, createWSPongFrame, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG, WebSocketError, CLOSE_POLICY_VIOLATION, CLOSE_MESSAGE_TOO_BIG, CLOSE_GOING_AWAY, DEFAULT_MAX_WS_FRAME_SIZE, clientWantsCompression, } from './websocket.js';
 import { Logger, NULL_LOGGER } from './logger.js';
+/** WS binary framing: [4B headerLen BE][header JSON][binary payload] — length-prefixed, not null-delimited */
+function encodeWSBinary(event, data) {
+    const hdr = Buffer.from(JSON.stringify({ event, _binary: true }), 'utf8');
+    const payload = Buffer.from(data);
+    const frame = Buffer.alloc(4 + hdr.length + payload.length);
+    frame.writeUInt32BE(hdr.length, 0);
+    hdr.copy(frame, 4);
+    payload.copy(frame, 4 + hdr.length);
+    return frame;
+}
+function parseWSBinary(payload) {
+    if (payload.length < 4)
+        return null;
+    const hdrLen = payload.readUInt32BE(0);
+    if (hdrLen > payload.length - 4)
+        return null;
+    try {
+        const hdr = JSON.parse(payload.subarray(4, 4 + hdrLen).toString('utf8'));
+        return { event: hdr.event, buffer: payload.subarray(4 + hdrLen) };
+    }
+    catch {
+        return null;
+    }
+}
 class RateLimiter {
     constructor(maxPts = 100, winMs = 1000) {
         this.maxPts = maxPts;
@@ -57,7 +79,6 @@ class StelarServer {
         this.rooms = new Map();
         this.events = new Map();
         this.mw = [];
-        this._hb = null;
         this._rc = null;
         this._wild = null;
         this._connH = null;
@@ -96,6 +117,7 @@ class StelarServer {
         this._genId = o.generateClientId || null;
         this._healthFn = o.customHealthHandler || null;
         this.hooks = o.hooks || {};
+        this.doCompress = o.compression || false;
         if (o.eventRateLimits)
             for (const [ev, c] of Object.entries(o.eventRateLimits))
                 this.evRateLimits.set(ev, new RateLimiter(c.maxPoints, c.windowMs));
@@ -123,6 +145,8 @@ class StelarServer {
             this.hbTimeout = o.heartbeatTimeout;
         if (o.allowedOrigins !== undefined)
             this.origins = o.allowedOrigins;
+        if (o.compression !== undefined)
+            this.doCompress = o.compression;
         if (o.rateLimit === false) {
             this.rateLimiter = null;
             this._crl = null;
@@ -158,7 +182,8 @@ class StelarServer {
             maxConnections: this.maxConns, maxConnectionsPerIP: this._cit ? -1 : 50,
             maxRooms: this.maxRooms, maxRoomsPerClient: this.maxRoomsPerClient, maxPayloadSize: this.maxPayload,
             heartbeatInterval: this.hbInterval, heartbeatTimeout: this.hbTimeout, connectTimeout: this.connTimeout,
-            shutdownTimeout: this.shutdownMs, hasCustomRateLimiter: this._crl !== null, hasCustomIPTracker: this._cit !== null,
+            shutdownTimeout: this.shutdownMs, compression: this.doCompress,
+            hasCustomRateLimiter: this._crl !== null, hasCustomIPTracker: this._cit !== null,
             hasCustomClientIdGenerator: this._genId !== null, hasCustomHealthHandler: this._healthFn !== null,
             eventRateLimits: Array.from(this.evRateLimits.keys()), hooks: Object.keys(this.hooks), allowedOrigins: this.origins,
         });
@@ -174,28 +199,35 @@ class StelarServer {
     broadcast(event, data, excludeId) {
         if (this.hooks.onBeforeBroadcast?.({ event, data, excludeId }) === false)
             return this;
-        const wsF = createWSTextFrame(JSON.stringify({ event, data }));
+        const json = JSON.stringify({ event, data });
+        const wsF = createWSTextFrame(json);
+        const wsFC = this.doCompress ? createWSTextFrame(json, true) : wsF;
         const tcpF = encodeJsonFrame(event, data, this.maxFrame);
         let sent = 0;
         this.clients.forEach(r => { if (excludeId && r.info.id === excludeId)
-            return; if (this._write(r, wsF, tcpF))
+            return; if (this._write(r, r.compress ? wsFC : wsF, tcpF))
             sent++; });
         this._totalSent += sent;
         return this;
     }
-    broadcastBinary(event, buf) { this.clients.forEach(r => this._sendBin(r, event, buf)); }
+    broadcastBinary(event, buf) {
+        const safeCopy = Buffer.from(new Uint8Array(buf));
+        this.clients.forEach(r => this._sendBin(r, event, safeCopy));
+    }
     to(room, event, data, excludeId) {
         const ids = this.rooms.get(room);
         if (!ids)
             return this;
-        const wsF = createWSTextFrame(JSON.stringify({ event, data }));
+        const json = JSON.stringify({ event, data });
+        const wsF = createWSTextFrame(json);
+        const wsFC = this.doCompress ? createWSTextFrame(json, true) : wsF;
         const tcpF = encodeJsonFrame(event, data, this.maxFrame);
         let sent = 0;
         for (const id of ids) {
             if (excludeId && id === excludeId)
                 continue;
             const r = this.byId.get(id);
-            if (r && this._write(r, wsF, tcpF))
+            if (r && this._write(r, r.compress ? wsFC : wsF, tcpF))
                 sent++;
         }
         this._totalSent += sent;
@@ -228,12 +260,18 @@ class StelarServer {
         };
     }
     onShutdown(cb) { this._shutdownCbs.push(cb); return this; }
-    /* ── Private: send helpers ── */
-    _sendJson(r, event, data) {
+    /* ── Private: backpressure-aware write ── */
+    _write(r, wsF, tcpF) {
         if (r.socket.destroyed || r.socket.writableEnded)
             return false;
+        if (r._writePaused) {
+            r._writeQueue.push(r.protocol === 'ws' ? wsF : tcpF);
+            return true;
+        }
         try {
-            r.socket.write(r.protocol === 'ws' ? createWSTextFrame(JSON.stringify({ event, data })) : encodeJsonFrame(event, data, this.maxFrame));
+            const ok = r.socket.write(r.protocol === 'ws' ? wsF : tcpF);
+            if (!ok)
+                r._writePaused = true;
             r.info.messagesSent++;
             return true;
         }
@@ -241,11 +279,19 @@ class StelarServer {
             return false;
         }
     }
-    _write(r, wsF, tcpF) {
+    _sendJson(r, event, data) {
         if (r.socket.destroyed || r.socket.writableEnded)
             return false;
         try {
-            r.socket.write(r.protocol === 'ws' ? wsF : tcpF);
+            const frame = r.protocol === 'ws' ? createWSTextFrame(JSON.stringify({ event, data }), r.compress) : encodeJsonFrame(event, data, this.maxFrame);
+            if (r._writePaused) {
+                r._writeQueue.push(frame);
+                r.info.messagesSent++;
+                return true;
+            }
+            const ok = r.socket.write(frame);
+            if (!ok)
+                r._writePaused = true;
             r.info.messagesSent++;
             return true;
         }
@@ -258,21 +304,50 @@ class StelarServer {
             return false;
         try {
             if (r.protocol === 'ws') {
-                const hdr = Buffer.from(JSON.stringify({ event, _binary: true }), 'utf8');
-                const combined = Buffer.alloc(hdr.length + 1 + buf.byteLength);
-                hdr.copy(combined, 0);
-                combined[hdr.length] = 0;
-                combined.set(new Uint8Array(buf), hdr.length + 1);
-                r.socket.write(createWSBinaryFrame(combined));
+                const frame = encodeWSBinary(event, buf);
+                if (r._writePaused) {
+                    r._writeQueue.push(createWSBinaryFrame(frame));
+                    r.info.messagesSent++;
+                    return true;
+                }
+                const ok = r.socket.write(createWSBinaryFrame(frame));
+                if (!ok)
+                    r._writePaused = true;
             }
             else {
-                r.socket.write(encodeBinaryFrame(event, new Uint8Array(buf), this.maxFrame));
+                const frame = encodeBinaryFrame(event, buf, this.maxFrame);
+                if (r._writePaused) {
+                    r._writeQueue.push(frame);
+                    r.info.messagesSent++;
+                    return true;
+                }
+                const ok = r.socket.write(frame);
+                if (!ok)
+                    r._writePaused = true;
             }
             r.info.messagesSent++;
             return true;
         }
         catch {
             return false;
+        }
+    }
+    _flushQueue(r) {
+        r._writePaused = false;
+        while (r._writeQueue.length) {
+            const buf = r._writeQueue.shift();
+            if (!r.socket.destroyed && !r.socket.writableEnded) {
+                try {
+                    const ok = r.socket.write(buf);
+                    if (!ok) {
+                        r._writePaused = true;
+                        break;
+                    }
+                }
+                catch {
+                    break;
+                }
+            }
         }
     }
     _checkRate(cid, event) {
@@ -295,8 +370,31 @@ class StelarServer {
         }
         return socket.remoteAddress || 'unknown';
     }
+    /* ── Private: per-client heartbeat ── */
+    _startClientHB(r) {
+        r._hbTimer = setInterval(() => {
+            if (r.socket.destroyed) {
+                this._stopClientHB(r);
+                return;
+            }
+            const now = Date.now();
+            if (now - r.info.lastPing > this.hbTimeout) {
+                r.socket.destroy();
+                return;
+            }
+            try {
+                r.socket.write(r.protocol === 'ws' ? createWSPingFrame() : encodePingFrame());
+            }
+            catch { }
+        }, this.hbInterval);
+        r._hbTimer.unref();
+    }
+    _stopClientHB(r) { if (r._hbTimer) {
+        clearInterval(r._hbTimer);
+        r._hbTimer = null;
+    } }
     /* ── Private: client lifecycle ── */
-    _register(socket, proto, req, parser) {
+    _register(socket, proto, req, parser, compress = false) {
         const ip = this._getIP(socket, req);
         if (this.clients.size >= this.maxConns) {
             this.hooks.onMaxConnectionsReached?.({ activeConnections: this.clients.size, max: this.maxConns, ip });
@@ -322,7 +420,7 @@ class StelarServer {
         }
         const id = this._genId ? this._genId() : randomUUID();
         const info = { id, rooms: new Set(), lastPing: Date.now(), protocol: proto, connectedAt: Date.now(), metadata: new Map(), messagesReceived: 0, messagesSent: 0, remoteAddress: ip };
-        const record = { info, socket, parser, protocol: proto };
+        const record = { info, socket, parser, protocol: proto, compress, _hbTimer: null, _writePaused: false, _writeQueue: [] };
         this.clients.set(socket, record);
         this.byId.set(id, record);
         tracker.add(ip);
@@ -330,6 +428,7 @@ class StelarServer {
         return record;
     }
     _unregister(r, ctx) {
+        this._stopClientHB(r);
         this.hooks.onClientDisconnect?.({ clientId: r.info.id, ip: r.info.remoteAddress, protocol: r.info.protocol, rooms: new Set(r.info.rooms) });
         for (const room of r.info.rooms) {
             const m = this.rooms.get(room);
@@ -393,9 +492,9 @@ class StelarServer {
             id: r.info.id, socket: r.socket, req, clientInfo: r.info,
             emit: (ev, d) => { if (s._sendJson(r, ev, d))
                 s._totalSent++; },
-            send: (rid, d) => { if (s._sendJson(r, rid, { data: d, _isAck: true }))
+            send: (rid, d) => { if (s._sendJson(r, rid, { data: d, _isAck: true, _correlationId: ctx._correlationId }))
                 s._totalSent++; },
-            emitBinary: (ev, buf) => { if (s._sendBin(r, ev, buf))
+            emitBinary: (ev, buf) => { if (s._sendBin(r, ev, Buffer.from(new Uint8Array(buf))))
                 s._totalSent++; },
             broadcast: (ev, d) => s.broadcast(ev, d, r.info.id),
             broadcastBinary: (ev, buf) => s.broadcastBinary(ev, buf),
@@ -424,7 +523,7 @@ class StelarServer {
                             const p = { event: name, data: res, _isAck: true };
                             if (ctx._correlationId)
                                 p._correlationId = ctx._correlationId;
-                            r.socket.write(createWSTextFrame(JSON.stringify(p)));
+                            r.socket.write(createWSTextFrame(JSON.stringify(p), r.compress));
                         }
                         else {
                             r.socket.write(ctx._correlationId
@@ -451,7 +550,7 @@ class StelarServer {
         } };
         run(0);
     }
-    /* ── Private: event dispatch (shared by WS & TCP) ── */
+    /* ── Private: event dispatch ── */
     _dispatch(r, ctx, event, data, correlationId) {
         if (event === 'pong') {
             r.info.lastPing = Date.now();
@@ -484,23 +583,6 @@ class StelarServer {
                 this.log.error('Wildcard error', { error: String(e) });
             }
     }
-    /* ── Private: heartbeat ── */
-    _startHeartbeat() {
-        this._hb = setInterval(() => {
-            const now = Date.now();
-            this.clients.forEach(r => {
-                if (now - r.info.lastPing > this.hbTimeout) {
-                    r.socket.destroy();
-                }
-                else
-                    try {
-                        r.socket.write(r.protocol === 'ws' ? createWSPingFrame() : encodePingFrame());
-                    }
-                    catch { }
-            });
-        }, this.hbInterval);
-        this._hb?.unref?.();
-    }
     /* ── Private: WS upgrade ── */
     _wsUpgrade(req, socket, head) {
         const path = new URL(req.url || '/', 'http://localhost').pathname;
@@ -519,12 +601,13 @@ class StelarServer {
             socket.destroy();
             return;
         }
+        const clientCompress = this.doCompress && clientWantsCompression(req.headers['sec-websocket-extensions']);
         try {
             const extra = {};
             const origin = req.headers['origin'];
             if (origin && this.origins?.includes(origin))
                 extra['Access-Control-Allow-Origin'] = origin;
-            socket.write(buildUpgradeResponse(key, extra));
+            socket.write(buildUpgradeResponse(key, extra, clientCompress));
         }
         catch {
             socket.destroy();
@@ -533,7 +616,7 @@ class StelarServer {
         const timer = setTimeout(() => { if (!this.clients.has(socket))
             socket.destroy(); }, this.connTimeout);
         timer.unref();
-        const r = this._register(socket, 'ws', req, new WSFrameParser(this.maxWSFrame));
+        const r = this._register(socket, 'ws', req, new WSFrameParser(this.maxWSFrame), clientCompress);
         if (!r) {
             clearTimeout(timer);
             return;
@@ -547,13 +630,14 @@ class StelarServer {
             catch (e) {
                 this.log.error('Connection handler error', { error: String(e) });
             } });
-        this.log.info('WS connected', { clientId: r.info.id, ip: r.info.remoteAddress });
+        this.log.info('WS connected', { clientId: r.info.id, ip: r.info.remoteAddress, compressed: clientCompress });
+        this._startClientHB(r);
         if (head.length > 0)
             this._processWS(r, head, ctx);
         socket.on('data', (d) => { clearTimeout(timer); this._processWS(r, d, ctx); });
         socket.on('close', () => { clearTimeout(timer); this._unregister(r, ctx); });
         socket.on('error', (e) => { this.log.warn('WS error', { clientId: r.info.id, error: e.message }); this._handleErr(r, ctx, e); });
-        socket.on('drain', () => socket.resume());
+        socket.on('drain', () => this._flushQueue(r));
     }
     _processWS(r, data, ctx) {
         let frames;
@@ -659,7 +743,7 @@ class StelarServer {
                     if (corrId)
                         p._correlationId = corrId;
                     try {
-                        r.socket.write(createWSTextFrame(JSON.stringify(p)));
+                        r.socket.write(createWSTextFrame(JSON.stringify(p), r.compress));
                         this._totalSent++;
                     }
                     catch { }
@@ -675,39 +759,29 @@ class StelarServer {
                 this.hooks.onPayloadTooLarge?.({ clientId: r.info.id, size: payload.length, max: this.maxPayload });
                 return;
             }
-            try {
-                let end = -1;
-                for (let i = 0; i < payload.length; i++)
-                    if (payload[i] === 0) {
-                        end = i;
-                        break;
-                    }
-                if (end === -1)
-                    return;
-                const hdr = JSON.parse(payload.subarray(0, end).toString('utf8'));
-                const buf = payload.subarray(end + 1);
-                if (hdr.event && !this._checkRate(r.info.id, hdr.event)) {
-                    this.log.warn('Binary rate limit', { clientId: r.info.id, event: hdr.event });
-                    if (this.hooks.onRateLimitExceeded?.({ clientId: r.info.id, event: hdr.event, protocol: 'ws' }) === false)
-                        return;
-                    return;
-                }
-                const ectx = { ...ctx, data: buf, buffer: buf, isBinary: true, event: hdr.event };
-                const h = this.events.get(hdr.event);
-                if (h)
-                    try {
-                        h(ectx);
-                    }
-                    catch { }
-                if (this._wild)
-                    try {
-                        this._wild({ event: hdr.event, data: ectx });
-                    }
-                    catch { }
-            }
-            catch {
+            const parsed = parseWSBinary(payload);
+            if (!parsed) {
                 this.hooks.onInvalidMessage?.({ clientId: r.info.id, reason: 'Invalid binary frame', protocol: 'ws' });
+                return;
             }
+            if (parsed.event && !this._checkRate(r.info.id, parsed.event)) {
+                this.log.warn('Binary rate limit', { clientId: r.info.id, event: parsed.event });
+                if (this.hooks.onRateLimitExceeded?.({ clientId: r.info.id, event: parsed.event, protocol: 'ws' }) === false)
+                    return;
+                return;
+            }
+            const ectx = { ...ctx, data: parsed.buffer, buffer: parsed.buffer, isBinary: true, event: parsed.event };
+            const h = this.events.get(parsed.event);
+            if (h)
+                try {
+                    h(ectx);
+                }
+                catch { }
+            if (this._wild)
+                try {
+                    this._wild({ event: parsed.event, data: ectx });
+                }
+                catch { }
         }
     }
     /* ── Private: TCP connection ── */
@@ -732,10 +806,11 @@ class StelarServer {
                 this.log.error('TCP connection handler error', { error: String(e) });
             } });
         this.log.info('TCP connected', { clientId: r.info.id, ip: r.info.remoteAddress });
+        this._startClientHB(r);
         socket.on('data', (d) => this._processTCP(r, d, ctx));
         socket.on('close', () => this._unregister(r, ctx));
         socket.on('error', (e) => { this.log.warn('TCP error', { clientId: r.info.id, error: e.message }); this._handleErr(r, ctx, e); });
-        socket.on('drain', () => socket.resume());
+        socket.on('drain', () => this._flushQueue(r));
     }
     _processTCP(r, data, ctx) {
         let frames;
@@ -830,21 +905,6 @@ class StelarServer {
                     this.log.error('TCP ACK handler error', { event, error: String(e) });
                 }
             }
-            return;
-        }
-        if (type === FRAME_ACK_RES) {
-            try {
-                const raw = JSON.parse(payload.toString('utf8'));
-                const data = raw && typeof raw === 'object' && 'data' in raw ? raw.data : raw;
-                const corrId = raw && typeof raw === 'object' && '_correlationId' in raw ? String(raw._correlationId) : undefined;
-                const h = this._acks.get(corrId || event);
-                if (h)
-                    try {
-                        h({ ...ctx, data });
-                    }
-                    catch { }
-            }
-            catch { }
             return;
         }
         if (type === FRAME_BINARY) {
@@ -981,7 +1041,6 @@ class StelarServer {
                 this._upgH = (req, socket, head) => this._wsUpgrade(req, socket, head);
                 srv.on('request', this._reqH);
                 srv.on('upgrade', this._upgH);
-                this._startHeartbeat();
                 this._rc = setInterval(() => {
                     if (this._crl)
                         this._crl.cleanup();
@@ -999,7 +1058,7 @@ class StelarServer {
                 this._rc?.unref?.();
                 this._setupShutdown();
                 const p = this.getPort();
-                this.log.info('Server started', { port: p, namespace: this.ns, tls: !!this.tlsOpts });
+                this.log.info('Server started', { port: p, namespace: this.ns, tls: !!this.tlsOpts, compression: this.doCompress });
                 cb?.(p);
                 resolve(p);
             };
@@ -1056,10 +1115,7 @@ class StelarServer {
             startPlain(port, attempts);
     }
     stop() {
-        if (this._hb) {
-            clearInterval(this._hb);
-            this._hb = null;
-        }
+        this.clients.forEach(r => this._stopClientHB(r));
         if (this._rc) {
             clearInterval(this._rc);
             this._rc = null;

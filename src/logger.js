@@ -1,5 +1,5 @@
 /** @stelar-time-real Logger */
-const PRIORITY = { debug: 0, info: 1, warn: 2, error: 3, silent: 4 };
+const P = { debug: 0, info: 1, warn: 2, error: 3, silent: 4 };
 const C = { debug: '\x1b[36m', info: '\x1b[32m', warn: '\x1b[33m', error: '\x1b[31m', reset: '\x1b[0m' };
 const isBrowser = typeof window !== 'undefined' && typeof process === 'undefined';
 export class Logger {
@@ -10,7 +10,9 @@ export class Logger {
         this.color = isBrowser ? false : o.colorize !== false;
     }
     setLevel(l) { this.level = l; return this; }
-    fmt(lvl, msg, meta) {
+    w(lvl, err, msg, meta) {
+        if (P[lvl] < P[this.level])
+            return;
         const p = [];
         if (this.ts)
             p.push(new Date().toISOString());
@@ -23,12 +25,7 @@ export class Logger {
             catch {
                 p.push('[circular]');
             }
-        return p.join(' ');
-    }
-    w(lvl, err, msg, meta) {
-        if (PRIORITY[lvl] < PRIORITY[this.level])
-            return;
-        const f = this.fmt(lvl, msg, meta);
+        const f = p.join(' ');
         if (isBrowser)
             console[lvl]?.(f);
         else
