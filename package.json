@@ -1,7 +1,7 @@
 {
   "name": "stelar-time-real",
-  "version": "2.0.3",
-  "description": "WebSocket liviano y rápido sin dependendas en TypeScript. Alternativa a socket.io, namespaces, ACKs y archivos binarios.",
+  "version": "3.2.0",
+  "description": "Zero-dependency production real-time library. Custom binary TCP + manual WebSocket. No ws package. Rate limiting (custom/per-event/per-client), hooks, custom IP tracker, custom health check, runtime config, rooms, ACKs, middleware, TLS/SSL.",
   "main": "./src/index.js",
   "types": "./src/index.d.ts",
   "type": "module",
@@ -12,22 +12,28 @@
   "keywords": [
     "websocket",
     "real-time",
-    "socket",
-    " realtime",
+    "realtime",
     "stelar",
     "chat",
-    "webserver"
+    "webserver",
+    "tcp",
+    "binary-protocol",
+    "zero-dependency",
+    "custom-protocol",
+    "production",
+    "rate-limiting",
+    "health-check"
   ],
   "author": "Stelar",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/stelar-time-real/stelar-time-real"
+    "url": "https://github.com/foxytp/stelar-time-real"
   },
   "bugs": {
-    "url": "https://github.com/stelar-time-real/stelar-time-real/issues"
+    "url": "https://github.com/foxytp/stelar-time-real/issues"
   },
-  "homepage": "https://github.com/stelar-time-real/stelar-time-real#readme",
+  "homepage": "https://github.com/foxytp/stelar-time-real#readme",
   "exports": {
     ".": "./src/index.js",
     "./client": "./src/client.js",
@@ -36,11 +42,9 @@
   "files": [
     "src"
   ],
-  "dependencies": {
-    "ws": "^8.14.0"
-  },
+  "dependencies": {},
   "devDependencies": {
-    "@types/ws": "^8.5.10",
+    "@types/node": "^22.0.0",
     "typescript": "^5.3.0"
   }
 }
