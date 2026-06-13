@@ -1,6 +1,6 @@
 # stelar-time-real v3
 
-**Librería en tiempo real para producción.** Zero dependencias. Protocolo binario TCP custom + WebSocket manual (RFC 6455 implementado desde cero). Sin paquetes externos.
+**Real-time library for production.** Zero dependencies. Custom binary TCP protocol + Manual WebSocket (RFC 6455 implemented from scratch). No external packages.
 
 ![npm](https://img.shields.io/npm/v/stelar-time-real)
 ![license](https://img.shields.io/npm/l/stelar-time-real)
@@ -9,88 +9,88 @@
 
 ---
 
-## Que es stelar-time-real?
+## What is stelar-time-real?
 
-stelar-time-real es una librería de comunicación en tiempo real diseñada desde cero para producción. No envuelve ni depende de ninguna librería externa — implementa su propio protocolo binario TCP y su propio WebSocket (RFC 6455) usando exclusivamente los módulos built-in de Node.js (`http`, `net`, `crypto`, `tls`).
+stelar-time-real is a real-time communication library designed from scratch for production. It does not wrap nor depend on any external library — it implements its own binary TCP protocol and its own WebSocket (RFC 6455) using exclusively Node.js built-in modules (`http`, `net`, `crypto`, `tls`).
 
-Esto significa control total: sin dependencias que se rompan, sin vulnerabilidades de terceros, sin bloat, y sin sorpresas. Cada byte que viaja por la red es controlado por la librería.
+This means total control: no dependencies that break, no third-party vulnerabilities, no bloat, and no surprises. Every byte that travels across the network is controlled by the library.
 
-### Para que sirve?
+### What is it for?
 
-- Chat en tiempo real (mensajería, notificaciones, typing indicators)
-- Aplicaciones colaborativas (editores, pizarras, documentos compartidos)
-- Streaming de datos binarios (imágenes, archivos, audio, video)
-- Microservicios internos con comunicación ultra rápida via TCP
-- Dashboards en vivo (métricas, monitoreo, trading)
-- Juegos multijugador en tiempo real
-- Redes sociales, plataformas tipo Discord
-- IoT y dispositivos conectados
+- Real-time chat (messaging, notifications, typing indicators)
+- Collaborative applications (editors, whiteboards, shared documents)
+- Binary data streaming (images, files, audio, video)
+- Internal microservices with ultra-fast communication via TCP
+- Live dashboards (metrics, monitoring, trading)
+- Real-time multiplayer games
+- Social networks, Discord-like platforms
+- IoT and connected devices
 
 ---
 
-## Características Principales
+## Main Features
 
-### Protocolo Dual
+### Dual Protocol
 
-El servidor soporta **dos protocolos simultáneamente** en puertos diferentes:
+The server supports **two protocols simultaneously** on different ports:
 
-- **WebSocket** — Para navegadores y clientes web. Implementación manual completa de RFC 6455: handshake, framing, masking, close codes, validación de RSV bits, max frame size enforcement.
-- **TCP Custom** — Para comunicación entre servidores y microservicios Node.js. Protocolo binario propio con overhead mínimo (7 bytes de header). Latencia ultra baja.
+- **WebSocket** — For browsers and web clients. Complete manual implementation of RFC 6455: handshake, framing, masking, close codes, RSV bits validation, max frame size enforcement.
+- **Custom TCP** — For server-to-server and Node.js microservices communication. Custom binary protocol with minimal overhead (7-byte header). Ultra-low latency.
 
-Ambos protocolos comparten la misma API del servidor. Un cliente WebSocket y un cliente TCP pueden estar en el mismo room, recibir los mismos broadcasts, e interactuar como si fueran el mismo tipo de conexión.
+Both protocols share the same server API. A WebSocket client and a TCP client can be in the same room, receive the same broadcasts, and interact as if they were the same type of connection.
 
-### Zero Dependencias
+### Zero Dependencies
 
 ```
 dependencies: {}
 ```
 
-No hay `ws`, no hay `engine.io`, no hay nada. Solo Node.js puro. Esto significa:
+No `ws`, no `engine.io`, nothing. Just pure Node.js. This means:
 
-- Sin vulnerabilidades en dependencias de terceros
-- Sin breaking changes por actualizaciones ajenas
-- Sin supply chain attacks
-- Tamaño mínimo en node_modules
-- Instalación instantánea
+- No vulnerabilities in third-party dependencies
+- No breaking changes from external updates
+- No supply chain attacks
+- Minimal size in node_modules
+- Instant installation
 
-### Preparada para Producción
+### Production-Ready
 
-Cada feature fue diseñada pensando en un entorno real con usuarios, ataques, y errores:
+Every feature was designed with a real environment in mind — with users, attacks, and errors:
 
-| Feature | Descripción |
+| Feature | Description |
 |---------|-------------|
-| **Rate Limiting** | Token bucket por cliente. Limita cuántos mensajes puede enviar cada cliente por ventana de tiempo. Previene spam y abuso. |
-| **Per-IP Throttling** | Limita conexiones simultáneas desde la misma dirección IP. Previene ataques de fuerza bruta y bots. |
-| **Max Connections** | Límite global de conexiones concurrentes. El servidor rechaza nuevas conexiones cuando se alcanza el límite. |
-| **Max Rooms** | Límite global de rooms y límite por cliente. Previene que un solo cliente cree miles de rooms y consuma memoria. |
-| **Graceful Shutdown** | Captura SIGINT/SIGTERM, deja de aceptar conexiones nuevas, espera a que las existentes se cierren (con timeout configurable), y limpia todos los recursos. |
-| **Health Check** | Endpoint HTTP `/health` con estadísticas del servidor en vivo. Compatible con Kubernetes, Docker, y load balancers. |
-| **Server Metrics** | Método `getStats()` con: conexiones activas, mensajes enviados/recibidos, rooms, uptime, uso de memoria, entradas del rate limiter. |
-| **TLS/SSL** | Soporte nativo para `wss://` y TCP sobre TLS. Configuración simple con key y cert. |
-| **Origin Checking** | Whitelist de orígenes permitidos para conexiones WebSocket. Previene CSRF y cross-origin abuse. |
-| **CORS** | Headers CORS automáticos en el health endpoint con soporte para OPTIONS preflight. |
-| **Input Validation** | Validación de nombres de eventos (strings no vacíos), tamaño máximo de payload, tamaño máximo de frames. |
-| **Backpressure Handling** | Manejo del evento `drain` del socket. No se pierden datos cuando el buffer de red está lleno. |
-| **Message Queue** | En el cliente: cola de mensajes cuando está desconectado. Se envían automáticamente al reconectar. Tamaño configurable, descarta los más viejos si se llena. |
-| **Exponential Backoff** | Reconexión inteligente con backoff exponencial y jitter. Evita thundering herd cuando el servidor se reinicia. |
-| **O(1) Client Lookup** | Búsqueda de cliente por ID en tiempo constante usando un Map indexado. Escalable a decenas de miles de clientes. |
-| **No Signal Handler Leaks** | Los handlers de SIGINT/SIGTERM se limpian correctamente al hacer `stop()`. Múltiples instancias no causan `MaxListenersExceeded`. |
-| **Timer unref** | Todos los timers internos usan `.unref()`. No impiden que el proceso de Node.js termine naturalmente. |
-| **Custom Rate Limiter** | Interfaz `IRateLimiter` para reemplazar el rate limiter built-in con tu propia implementación (Redis, MongoDB, etc). |
-| **Custom IP Tracker** | Interfaz `IIPTracker` para reemplazar el tracker de IP built-in con tu propia lógica. |
-| **Custom Client ID** | Función `generateClientId` para generar IDs con tu propio formato. |
-| **Event Rate Limits** | Rate limits por evento individual. Cada evento puede tener su propio límite de mensajes. |
-| **Per-Client Rate Limits** | Rate limits por cliente individual con `setClientRateLimit()`. Override del límite global para clientes específicos. |
-| **Hook System** | Callbacks para cada evento del servidor: rate limit excedido, max connections, payload too large, join/leave room, etc. |
-| **Custom Health Handler** | Función `customHealthHandler` para reemplazar el health check built-in con tu propia lógica. |
-| **Runtime Config** | Método `updateConfig()` para cambiar la configuración del servidor en caliente, sin reiniciar. |
-| **Client Hooks** | Hooks en el cliente: `onBeforeEmit`, `onMessage`, `onStateChange`, `onReconnectDelay`, `onMessageQueued`, `onQueueDrained`, `onError`. |
-| **Custom Reconnect** | Función `customReconnectDelay` o hook `onReconnectDelay` para controlar la lógica de reconexión del cliente. |
-| **Client Runtime Config** | Método `updateOptions()` para cambiar la configuración del cliente en caliente. |
+| **Rate Limiting** | Token bucket per client. Limits how many messages each client can send per time window. Prevents spam and abuse. |
+| **Per-IP Throttling** | Limits simultaneous connections from the same IP address. Prevents brute force attacks and bots. |
+| **Max Connections** | Global limit of concurrent connections. The server rejects new connections when the limit is reached. |
+| **Max Rooms** | Global limit of rooms and per-client limit. Prevents a single client from creating thousands of rooms and consuming memory. |
+| **Graceful Shutdown** | Captures SIGINT/SIGTERM, stops accepting new connections, waits for existing ones to close (with configurable timeout), and cleans up all resources. |
+| **Health Check** | HTTP `/health` endpoint with live server statistics. Compatible with Kubernetes, Docker, and load balancers. |
+| **Server Metrics** | `getStats()` method with: active connections, messages sent/received, rooms, uptime, memory usage, rate limiter entries. |
+| **TLS/SSL** | Native support for `wss://` and TCP over TLS. Simple configuration with key and cert. |
+| **Origin Checking** | Whitelist of allowed origins for WebSocket connections. Prevents CSRF and cross-origin abuse. |
+| **CORS** | Automatic CORS headers on the health endpoint with support for OPTIONS preflight. |
+| **Input Validation** | Validation of event names (non-empty strings), max payload size, max frame size. |
+| **Backpressure Handling** | Handles the socket's `drain` event. No data is lost when the network buffer is full. |
+| **Message Queue** | On the client: message queue when disconnected. Sent automatically upon reconnection. Configurable size, discards oldest if full. |
+| **Exponential Backoff** | Smart reconnection with exponential backoff and jitter. Prevents thundering herd when the server restarts. |
+| **O(1) Client Lookup** | Client lookup by ID in constant time using an indexed Map. Scalable to tens of thousands of clients. |
+| **No Signal Handler Leaks** | SIGINT/SIGTERM handlers are properly cleaned up when calling `stop()`. Multiple instances don't cause `MaxListenersExceeded`. |
+| **Timer unref** | All internal timers use `.unref()`. They don't prevent the Node.js process from terminating naturally. |
+| **Custom Rate Limiter** | `IRateLimiter` interface to replace the built-in rate limiter with your own implementation (Redis, MongoDB, etc). |
+| **Custom IP Tracker** | `IIPTracker` interface to replace the built-in IP tracker with your own logic. |
+| **Custom Client ID** | `generateClientId` function to generate IDs with your own format. |
+| **Event Rate Limits** | Rate limits per individual event. Each event can have its own message limit. |
+| **Per-Client Rate Limits** | Rate limits per individual client with `setClientRateLimit()`. Override the global limit for specific clients. |
+| **Hook System** | Callbacks for every server event: rate limit exceeded, max connections, payload too large, join/leave room, etc. |
+| **Custom Health Handler** | `customHealthHandler` function to replace the built-in health check with your own logic. |
+| **Runtime Config** | `updateConfig()` method to change server configuration on the fly, without restarting. |
+| **Client Hooks** | Hooks on the client: `onBeforeEmit`, `onMessage`, `onStateChange`, `onReconnectDelay`, `onMessageQueued`, `onQueueDrained`, `onError`. |
+| **Custom Reconnect** | `customReconnectDelay` function or `onReconnectDelay` hook to control client reconnection logic. |
+| **Client Runtime Config** | `updateOptions()` method to change client configuration on the fly. |
 
 ---
 
-## Instalación
+## Installation
 
 ```bash
 npm install stelar-time-real
@@ -100,7 +100,7 @@ npm install stelar-time-real
 
 ## Quick Start
 
-### Servidor basico
+### Basic Server
 
 ```javascript
 import express from 'express';
@@ -112,8 +112,8 @@ const server = app.listen(3000);
 const stelar = new StelarServer({ server });
 
 stelar.onConnection((client) => {
-  console.log('Conectado:', client.id);
-  client.emit('welcome', { message: 'Bienvenido al servidor!' });
+  console.log('Connected:', client.id);
+  client.emit('welcome', { message: 'Welcome to the server!' });
 });
 
 stelar.on('chat', (ctx) => {
@@ -123,7 +123,7 @@ stelar.on('chat', (ctx) => {
 await stelar.start();
 ```
 
-### Servidor con configuracion de produccion
+### Server with Production Configuration
 
 ```javascript
 import express from 'express';
@@ -145,25 +145,25 @@ const stelar = new StelarServer({
   heartbeatTimeout: 60000,
   gracefulShutdown: true,
   shutdownTimeout: 10000,
-  allowedOrigins: ['https://midominio.com'],
+  allowedOrigins: ['https://mydomain.com'],
   logger: 'info',
 });
 
-// Middleware de autenticación
+// Authentication middleware
 stelar.use((ctx, next) => {
   const token = ctx.req?.headers?.authorization;
-  if (!token) return ctx.ack('error', { message: 'Token requerido' });
+  if (!token) return ctx.ack('error', { message: 'Token required' });
   next();
 });
 
 stelar.onConnection((client) => {
-  console.log(`[${client.protocol}] Cliente conectado: ${client.id} desde ${client.remoteAddress}`);
+  console.log(`[${client.protocol}] Client connected: ${client.id} from ${client.remoteAddress}`);
   client.setMetadata('role', 'user');
   client.emit('welcome', { id: client.id });
 });
 
 stelar.onDisconnect((client) => {
-  console.log('Cliente desconectado:', client.id);
+  console.log('Client disconnected:', client.id);
 });
 
 stelar.on('chat', (ctx) => {
@@ -171,14 +171,14 @@ stelar.on('chat', (ctx) => {
 });
 
 stelar.onAck('getUser', (ctx) => {
-  return { id: ctx.data.id, name: 'Juan', role: ctx.getMetadata('role') };
+  return { id: ctx.data.id, name: 'John', role: ctx.getMetadata('role') };
 });
 
 await stelar.start();
-console.log('Servidor listo en puerto', stelar.getPort());
+console.log('Server ready on port', stelar.getPort());
 ```
 
-### Cliente (Navegador o Node.js)
+### Client (Browser or Node.js)
 
 ```javascript
 import { StelarClient } from 'stelar-time-real';
@@ -192,29 +192,29 @@ const client = new StelarClient('localhost:3000', {
   messageQueueSize: 100,
 });
 
-client.on('connect', () => console.log('Conectado!'));
-client.on('disconnect', () => console.log('Desconectado'));
-client.on('welcome', (data) => console.log('Bienvenido:', data));
+client.on('connect', () => console.log('Connected!'));
+client.on('disconnect', () => console.log('Disconnected'));
+client.on('welcome', (data) => console.log('Welcome:', data));
 
 client.connect();
 
-// Enviar mensaje
-client.emit('chat', { message: 'Hola a todos!' });
+// Send message
+client.emit('chat', { message: 'Hello everyone!' });
 
-// Request-response con Promise
+// Request-response with Promise
 const user = await client.request('getUser', { id: 1 }, 'getUser');
-console.log(user); // { id: 1, name: 'Juan', role: 'user' }
+console.log(user); // { id: 1, name: 'John', role: 'user' }
 
-// Unirse a rooms
+// Join rooms
 client.joinRoom('general');
 client.joinRoom('random');
 
-// Enviar binario
-const buffer = Buffer.from('datos binarios');
+// Send binary
+const buffer = Buffer.from('binary data');
 client.emitBinary('file', buffer);
 ```
 
-### Cliente con modo TCP (Node.js unicamente — maxima eficiencia)
+### Client with TCP Mode (Node.js only — maximum efficiency)
 
 ```javascript
 const client = new StelarClient('localhost:3001', {
@@ -222,30 +222,30 @@ const client = new StelarClient('localhost:3001', {
   reconnection: true,
 });
 
-client.on('connect', () => console.log('TCP conectado!'));
+client.on('connect', () => console.log('TCP connected!'));
 client.connect();
 ```
 
-El modo TCP usa el protocolo binario custom en vez de WebSocket. Menos overhead, menor latencia, ideal para comunicación entre servidores.
+TCP mode uses the custom binary protocol instead of WebSocket. Less overhead, lower latency, ideal for server-to-server communication.
 
-### Cliente con TLS/WSS (conexiones seguras)
+### Client with TLS/WSS (secure connections)
 
 ```javascript
-// WSS — WebSocket seguro
-const client = new StelarClient('wss://secure.midominio.com', {
+// WSS — Secure WebSocket
+const client = new StelarClient('wss://secure.mydomain.com', {
   tls: true,
   rejectUnauthorized: true,
 });
 
 // TCP + TLS
-const client = new StelarClient('secure.midominio.com:3001', {
+const client = new StelarClient('secure.mydomain.com:3001', {
   mode: 'tcp',
   tls: true,
   rejectUnauthorized: true,
 });
 ```
 
-### Servidor con TLS
+### Server with TLS
 
 ```javascript
 import { readFileSync } from 'fs';
@@ -262,45 +262,45 @@ const stelar = new StelarServer({
 
 ---
 
-## Arquitectura
+## Architecture
 
-### Protocolo Dual
+### Dual Protocol
 
 ```
-                        Servidor stelar-time-real
+                        stelar-time-real Server
                        ┌──────────────────────────┐
                        │                          │
-   Navegadores  ──────►  Puerto 3000 (WebSocket)  │
+   Browsers  ──────►   │  Port 3000 (WebSocket)  │
    (ws://)              │         │                │
-                       │    Misma lógica          │
-   Node.js      ──────►  Puerto 3001 (TCP Custom) │
-   (modo tcp)           │         │                │
+                       │    Same logic            │
+   Node.js     ──────►  │  Port 3001 (Custom TCP) │
+   (tcp mode)           │         │                │
                        │                          │
                        └──────────────────────────┘
 ```
 
-Ambos protocolos comparten:
-- Mismos event handlers
-- Mismos rooms
-- Mismo sistema de broadcast
-- Mismo sistema de ACK
-- Mismo middleware
-- Mismas métricas
+Both protocols share:
+- Same event handlers
+- Same rooms
+- Same broadcast system
+- Same ACK system
+- Same middleware
+- Same metrics
 
-Un cliente WebSocket y un cliente TCP pueden estar en el mismo room y comunicarse sin problemas.
+A WebSocket client and a TCP client can be in the same room and communicate without issues.
 
 ### WebSocket Mode vs TCP Mode
 
-| Aspecto | WebSocket | TCP Custom |
+| Aspect | WebSocket | Custom TCP |
 |---------|-----------|------------|
-| Navegador | Si | No |
-| Node.js | Si | Si |
-| Overhead por frame | 2-14 bytes (RFC 6455) | 7 bytes (header custom) |
-| Latencia | Baja | Ultra baja |
-| TLS | wss:// | TLS nativo |
-| Caso de uso | Frontend, apps web | Microservicios, backend |
+| Browser | Yes | No |
+| Node.js | Yes | Yes |
+| Overhead per frame | 2-14 bytes (RFC 6455) | 7 bytes (custom header) |
+| Latency | Low | Ultra low |
+| TLS | wss:// | Native TLS |
+| Use case | Frontend, web apps | Microservices, backend |
 
-### Formato del Protocolo Binario (TCP)
+### Binary Protocol Format (TCP)
 
 ```
 ┌──────────────┬──────────┬───────────────┬──────────────┬──────────────┐
@@ -309,267 +309,267 @@ Un cliente WebSocket y un cliente TCP pueden estar en el mismo room y comunicars
 └──────────────┴──────────┴───────────────┴──────────────┴──────────────┘
 ```
 
-**11 tipos de frame:**
+**11 frame types:**
 
-| Tipo | Código | Descripción |
+| Type | Code | Description |
 |------|--------|-------------|
-| JSON | 0 | Evento con payload JSON |
-| Binary | 1 | Datos binarios puros |
-| Ping | 2 | Heartbeat del cliente |
-| Pong | 3 | Respuesta del servidor |
-| ACK Request | 4 | Petición que espera respuesta |
-| ACK Response | 5 | Respuesta a una petición ACK |
-| Connect | 6 | Frame de conexión inicial |
-| Disconnect | 7 | Frame de desconexión |
-| Join Room | 8 | Unirse a un room |
-| Leave Room | 9 | Salir de un room |
-| Error | 10 | Frame de error |
+| JSON | 0 | Event with JSON payload |
+| Binary | 1 | Pure binary data |
+| Ping | 2 | Client heartbeat |
+| Pong | 3 | Server response |
+| ACK Request | 4 | Request expecting response |
+| ACK Response | 5 | Response to an ACK request |
+| Connect | 6 | Initial connection frame |
+| Disconnect | 7 | Disconnection frame |
+| Join Room | 8 | Join a room |
+| Leave Room | 9 | Leave a room |
+| Error | 10 | Error frame |
 
-### WebSocket Manual (RFC 6455)
+### Manual WebSocket (RFC 6455)
 
-stelar-time-real implementa WebSocket desde cero usando solo `http` y `crypto` de Node.js. No usa la librería `ws` ni ninguna otra.
+stelar-time-real implements WebSocket from scratch using only Node.js `http` and `crypto`. It doesn't use the `ws` library or any other.
 
-La implementación incluye:
-- **Handshake** — Calcula el Sec-WebSocket-Accept con SHA-1 según RFC 6455
-- **Framing** — Parseo y creación de frames (text, binary, ping, pong, close)
-- **Masking** — Aplica/desaplica XOR mask (requerido cliente→servidor)
-- **Fragmentación** — Manejo de frames fragmentados
-- **Close codes** — Todos los códigos de cierre soportados
-- **Validación** — RSV bits, opcode validation, max frame size
-- **PING/PONG** — El servidor responde PONG a PING correctamente
+The implementation includes:
+- **Handshake** — Calculates Sec-WebSocket-Accept with SHA-1 per RFC 6455
+- **Framing** — Frame parsing and creation (text, binary, ping, pong, close)
+- **Masking** — Applies/removes XOR mask (required client→server)
+- **Fragmentation** — Fragmented frame handling
+- **Close codes** — All close codes supported
+- **Validation** — RSV bits, opcode validation, max frame size
+- **PING/PONG** — Server responds PONG to PING correctly
 
 ---
 
-## API Completa
+## Complete API
 
-### StelarServer — Opciones
+### StelarServer — Options
 
 ```javascript
 new StelarServer({
-  // Conexión
-  port: 3000,                     // Puerto HTTP/WebSocket
-  server: httpServer,             // Servidor HTTP existente (alternativa a port)
-  namespace: '/',                 // Path del namespace
-  tcpPort: 3001,                  // Puerto TCP (false = deshabilitado)
+  // Connection
+  port: 3000,                     // HTTP/WebSocket port
+  server: httpServer,             // Existing HTTP server (alternative to port)
+  namespace: '/',                 // Namespace path
+  tcpPort: 3001,                  // TCP port (false = disabled)
 
-  // Límites
-  maxConnections: 10000,          // Máximo de conexiones concurrentes
-  maxConnectionsPerIP: 50,        // Máximo de conexiones por dirección IP
-  maxRooms: 10000,                // Máximo de rooms globales
-  maxRoomsPerClient: 50,          // Máximo de rooms por cliente
-  maxPayloadSize: 10 * 1024 * 1024,  // Tamaño máximo de payload (10MB)
-  maxFrameSize: 10 * 1024 * 1024,    // Tamaño máximo de frame WebSocket (10MB)
+  // Limits
+  maxConnections: 10000,          // Maximum concurrent connections
+  maxConnectionsPerIP: 50,        // Maximum connections per IP address
+  maxRooms: 10000,                // Maximum global rooms
+  maxRoomsPerClient: 50,          // Maximum rooms per client
+  maxPayloadSize: 10 * 1024 * 1024,  // Maximum payload size (10MB)
+  maxFrameSize: 10 * 1024 * 1024,    // Maximum WebSocket frame size (10MB)
 
   // Rate Limiting
   rateLimit: {
-    maxPoints: 100,               // Máximo de puntos (mensajes) por ventana
-    windowMs: 1000,               // Ventana de tiempo en milisegundos
+    maxPoints: 100,               // Maximum points (messages) per window
+    windowMs: 1000,               // Time window in milliseconds
   },
 
   // Timeouts
-  heartbeatInterval: 30000,       // Intervalo de ping (30s)
-  heartbeatTimeout: 60000,        // Timeout antes de desconectar (60s)
-  connectTimeout: 10000,          // Timeout de conexión inicial (10s)
+  heartbeatInterval: 30000,       // Ping interval (30s)
+  heartbeatTimeout: 60000,        // Timeout before disconnecting (60s)
+  connectTimeout: 10000,          // Initial connection timeout (10s)
 
-  // Producción
-  healthEndpoint: '/health',      // URL del health check (false = deshabilitado)
-  gracefulShutdown: true,         // Capturar SIGINT/SIGTERM
-  shutdownTimeout: 10000,         // Tiempo máximo de espera al cerrar (10s)
-  allowedOrigins: ['https://midominio.com'],  // Orígenes permitidos (null = todos)
-  tls: { key, cert },             // Opciones TLS para wss:// y TCP TLS
+  // Production
+  healthEndpoint: '/health',      // Health check URL (false = disabled)
+  gracefulShutdown: true,         // Capture SIGINT/SIGTERM
+  shutdownTimeout: 10000,         // Maximum wait time when closing (10s)
+  allowedOrigins: ['https://mydomain.com'],  // Allowed origins (null = all)
+  tls: { key, cert },             // TLS options for wss:// and TCP TLS
 
   // Logging
-  logger: 'info',                 // Nivel: 'debug'|'info'|'warn'|'error'|'silent'
-                                  // También acepta instancia de Logger o false
+  logger: 'info',                 // Level: 'debug'|'info'|'warn'|'error'|'silent'
+                                  // Also accepts Logger instance or false
 });
 ```
 
-### StelarServer — Métodos
+### StelarServer — Methods
 
-#### Eventos
+#### Events
 
-| Método | Descripción |
+| Method | Description |
 |--------|-------------|
-| `.on(event, handler)` | Escuchar eventos de clientes |
-| `.onAll(handler)` | Escuchar todos los eventos |
-| `.onConnection(handler)` | Cliente conectado |
-| `.onDisconnect(handler)` | Cliente desconectado |
-| `.onAck(name, handler)` | Registrar handler ACK (retorna valor al cliente) |
+| `.on(event, handler)` | Listen to client events |
+| `.onAll(handler)` | Listen to all events |
+| `.onConnection(handler)` | Client connected |
+| `.onDisconnect(handler)` | Client disconnected |
+| `.onAck(name, handler)` | Register ACK handler (returns value to client) |
 
-#### Envío de mensajes
+#### Message Sending
 
-| Método | Descripción |
+| Method | Description |
 |--------|-------------|
-| `.broadcast(event, data, excludeId?)` | Enviar a todos los clientes (opcionalmente excluir uno) |
-| `.to(room, event, data, excludeId?)` | Enviar a un room (opcionalmente excluir) |
-| `.toId(id, event, data)` | Enviar a un cliente específico — búsqueda O(1) |
-| `.broadcastBinary(event, buffer)` | Broadcast de datos binarios |
+| `.broadcast(event, data, excludeId?)` | Send to all clients (optionally exclude one) |
+| `.to(room, event, data, excludeId?)` | Send to a room (optionally exclude) |
+| `.toId(id, event, data)` | Send to a specific client — O(1) lookup |
+| `.broadcastBinary(event, buffer)` | Broadcast binary data |
 
-#### Información
+#### Information
 
-| Método | Descripción |
+| Method | Description |
 |--------|-------------|
-| `.getClients(room?)` | Lista de clientes con sus rooms |
-| `.getRoomMembers(room)` | IDs de clientes en un room |
-| `.getRooms()` | Lista de rooms activos |
-| `.getStats()` | Estadísticas del servidor |
-| `.getPort()` | Puerto en el que corre el servidor |
+| `.getClients(room?)` | Client list with their rooms |
+| `.getRoomMembers(room)` | Client IDs in a room |
+| `.getRooms()` | List of active rooms |
+| `.getStats()` | Server statistics |
+| `.getPort()` | Port the server is running on |
 
 #### Lifecycle
 
-| Método | Descripción |
+| Method | Description |
 |--------|-------------|
-| `.use(middleware)` | Agregar middleware de conexión |
-| `.start(callback?)` | Iniciar servidor, retorna `Promise<number>` con el puerto |
-| `.stop()` | Detener servidor, cerrar conexiones, limpiar handlers |
+| `.use(middleware)` | Add connection middleware |
+| `.start(callback?)` | Start server, returns `Promise<number>` with the port |
+| `.stop()` | Stop server, close connections, clean up handlers |
 
-### StelarContext (ctx) — Dentro de los handlers
+### StelarContext (ctx) — Inside handlers
 
-Cada handler de evento recibe un contexto (`ctx`) con toda la información y acciones disponibles:
+Every event handler receives a context (`ctx`) with all available information and actions:
 
 ```javascript
 stelar.on('message', (ctx) => {
-  // Información del cliente
-  ctx.id                        // ID único del cliente
-  ctx.socket                    // net.Socket crudo
-  ctx.req                       // HTTP request (null para TCP)
-  ctx.data                      // Datos recibidos
-  ctx.clientInfo                // Info del cliente
-  ctx.clientInfo.rooms          // Set de rooms del cliente
-  ctx.clientInfo.metadata       // Map de metadata custom
-  ctx.clientInfo.remoteAddress  // Dirección IP del cliente
-  ctx.clientInfo.protocol       // 'ws' o 'tcp'
+  // Client information
+  ctx.id                        // Unique client ID
+  ctx.socket                    // Raw net.Socket
+  ctx.req                       // HTTP request (null for TCP)
+  ctx.data                      // Received data
+  ctx.clientInfo                // Client info
+  ctx.clientInfo.rooms          // Client's room Set
+  ctx.clientInfo.metadata       // Custom metadata Map
+  ctx.clientInfo.remoteAddress  // Client's IP address
+  ctx.clientInfo.protocol       // 'ws' or 'tcp'
 
-  // Acciones — Enviar mensajes
-  ctx.emit('event', data)               // Enviar a este cliente
-  ctx.send('response', data)            // Responder a ACK
-  ctx.emitBinary('event', buffer)       // Enviar binario
-  ctx.broadcast('event', data)          // Enviar a todos (excluyéndose)
-  ctx.broadcastBinary('event', buf)     // Broadcast binario
-  ctx.to('room', 'event', data)         // Enviar a un room
-  ctx.toId('id', 'event', data)         // Enviar a cliente específico (O(1))
+  // Actions — Send messages
+  ctx.emit('event', data)               // Send to this client
+  ctx.send('response', data)            // Respond to ACK
+  ctx.emitBinary('event', buffer)       // Send binary
+  ctx.broadcast('event', data)          // Send to all (excluding self)
+  ctx.broadcastBinary('event', buf)     // Binary broadcast
+  ctx.to('room', 'event', data)         // Send to a room
+  ctx.toId('id', 'event', data)         // Send to specific client (O(1))
 
-  // Acciones — Rooms
-  ctx.joinRoom('room')                  // Unirse a un room
-  ctx.leaveRoom('room')                 // Salir de un room
-  ctx.getClients('room')                // Listar clientes del room
+  // Actions — Rooms
+  ctx.joinRoom('room')                  // Join a room
+  ctx.leaveRoom('room')                 // Leave a room
+  ctx.getClients('room')                // List room clients
 
-  // Acciones — Metadata
-  ctx.setMetadata('role', 'admin')      // Guardar dato custom
-  ctx.getMetadata('role')               // Leer dato custom
+  // Actions — Metadata
+  ctx.setMetadata('role', 'admin')      // Store custom data
+  ctx.getMetadata('role')               // Read custom data
 
-  // Acciones — ACK
-  ctx.ack('myAck', data)                // Responder a una petición ACK
+  // Actions — ACK
+  ctx.ack('myAck', data)                // Respond to an ACK request
 });
 ```
 
-### StelarClient — Opciones
+### StelarClient — Options
 
 ```javascript
 new StelarClient(urlOrPort, {
-  // Conexión
-  reconnection: true,            // Auto reconectar
-  reconnectionAttempts: 10,      // Máximo de intentos
-  reconnectionDelay: 1000,       // Delay base (ms)
-  maxReconnectionDelay: 30000,   // Delay máximo (ms)
-  heartbeatInterval: 30000,      // Intervalo de heartbeat
+  // Connection
+  reconnection: true,            // Auto reconnect
+  reconnectionAttempts: 10,      // Maximum attempts
+  reconnectionDelay: 1000,       // Base delay (ms)
+  maxReconnectionDelay: 30000,   // Maximum delay (ms)
+  heartbeatInterval: 30000,      // Heartbeat interval
 
-  // Protocolo
-  mode: 'ws',                    // 'ws' o 'tcp'
+  // Protocol
+  mode: 'ws',                    // 'ws' or 'tcp'
   maxPayloadSize: 10 * 1024 * 1024,
   maxFrameSize: 10 * 1024 * 1024,
 
   // ACK
-  ackTimeout: 5000,              // Timeout de ACK (ms)
+  ackTimeout: 5000,              // ACK timeout (ms)
 
-  // Cola de mensajes
-  messageQueueSize: 100,         // Mensajes en cola cuando está desconectado
+  // Message queue
+  messageQueueSize: 100,         // Queued messages when disconnected
 
-  // Seguridad
-  tls: false,                    // Habilitar TLS para wss:// o TCP TLS
-  rejectUnauthorized: true,      // Validar certificado TLS
+  // Security
+  tls: false,                    // Enable TLS for wss:// or TCP TLS
+  rejectUnauthorized: true,      // Validate TLS certificate
 
-  // Headers custom
-  headers: {},                   // Headers para el handshake WebSocket
+  // Custom headers
+  headers: {},                   // Headers for WebSocket handshake
 
   // Logging
-  logger: 'warn',                // Nivel de log
+  logger: 'warn',                // Log level
 });
 ```
 
-### StelarClient — Métodos
+### StelarClient — Methods
 
-#### Eventos
+#### Events
 
-| Método | Descripción |
+| Method | Description |
 |--------|-------------|
-| `.on(event, handler)` | Escuchar evento |
-| `.off(event, handler)` | Remover listener |
-| `.once(event, handler)` | Escuchar una sola vez |
-| `.onAll(handler)` | Escuchar todos los eventos |
-| `.onAck(name, handler)` | Escuchar respuestas ACK |
+| `.on(event, handler)` | Listen to event |
+| `.off(event, handler)` | Remove listener |
+| `.once(event, handler)` | Listen once |
+| `.onAll(handler)` | Listen to all events |
+| `.onAck(name, handler)` | Listen to ACK responses |
 
-#### Envío
+#### Sending
 
-| Método | Descripción |
+| Method | Description |
 |--------|-------------|
-| `.emit(event, data, opts?)` | Enviar evento (`opts.ack` para ACK) |
-| `.emitBinary(event, data)` | Enviar datos binarios |
-| `.sendFile(file)` | Enviar archivo |
-| `.sendImage(blob)` | Enviar imagen |
-| `.request(event, data, ackName)` | Request-response con Promise |
+| `.emit(event, data, opts?)` | Send event (`opts.ack` for ACK) |
+| `.emitBinary(event, data)` | Send binary data |
+| `.sendFile(file)` | Send file |
+| `.sendImage(blob)` | Send image |
+| `.request(event, data, ackName)` | Request-response with Promise |
 
 #### Rooms
 
-| Método | Descripción |
+| Method | Description |
 |--------|-------------|
-| `.joinRoom(room)` | Unirse a un room |
-| `.leaveRoom(room)` | Salir de un room |
+| `.joinRoom(room)` | Join a room |
+| `.leaveRoom(room)` | Leave a room |
 
 #### Lifecycle
 
-| Método | Descripción |
+| Method | Description |
 |--------|-------------|
-| `.connect(callback?)` | Conectar al servidor |
-| `.disconnect()` | Desconectar y limpiar todos los recursos |
+| `.connect(callback?)` | Connect to server |
+| `.disconnect()` | Disconnect and clean up all resources |
 
-#### Estado y métricas
+#### State and Metrics
 
-| Método | Descripción |
+| Method | Description |
 |--------|-------------|
-| `.isConnected()` | Está conectado? |
-| `.getState()` | Estado: `'disconnected'` \| `'connecting'` \| `'connected'` \| `'reconnecting'` |
-| `.getId()` | ID asignado por el servidor |
-| `.getUrl()` | URL del servidor |
-| `.setUrl(url)` | Cambiar URL antes de conectar |
-| `.getMessagesSent()` | Total de mensajes enviados |
-| `.getMessagesReceived()` | Total de mensajes recibidos |
-| `.getLastError()` | Último error |
-| `.getConnectTime()` | Timestamp de la última conexión exitosa |
-| `.getQueueSize()` | Mensajes pendientes en la cola |
-| `.removeAllListeners(event?)` | Limpiar listeners |
+| `.isConnected()` | Is connected? |
+| `.getState()` | State: `'disconnected'` \| `'connecting'` \| `'connected'` \| `'reconnecting'` |
+| `.getId()` | ID assigned by the server |
+| `.getUrl()` | Server URL |
+| `.setUrl(url)` | Change URL before connecting |
+| `.getMessagesSent()` | Total messages sent |
+| `.getMessagesReceived()` | Total messages received |
+| `.getLastError()` | Last error |
+| `.getConnectTime()` | Timestamp of last successful connection |
+| `.getQueueSize()` | Pending messages in queue |
+| `.removeAllListeners(event?)` | Clear listeners |
 
-### Eventos del Cliente
+### Client Events
 
 ```javascript
 client.on('connect', () => {
-  // Conexión establecida
+  // Connection established
 });
 
 client.on('disconnect', (info) => {
-  // info = { code, reason } para WebSocket
+  // info = { code, reason } for WebSocket
 });
 
 client.on('reconnecting', (attempt) => {
-  // Intento número `attempt` de reconexión
+  // Reconnection attempt number `attempt`
 });
 
 client.on('reconnect_failed', () => {
-  // Se agotaron los intentos de reconexión
+  // Reconnection attempts exhausted
 });
 
 client.on('error', (err) => {
-  // Error de conexión o protocolo
+  // Connection or protocol error
 });
 ```
 
@@ -577,13 +577,13 @@ client.on('error', (err) => {
 
 ## Health Check
 
-El endpoint de health check está diseñado para integrarse con orquestadores como Kubernetes, Docker Swarm, o cualquier load balancer.
+The health check endpoint is designed to integrate with orchestrators like Kubernetes, Docker Swarm, or any load balancer.
 
 ```bash
 curl http://localhost:3000/health
 ```
 
-Respuesta:
+Response:
 
 ```json
 {
@@ -608,27 +608,27 @@ Respuesta:
 }
 ```
 
-CORS es automático en el health endpoint. Si `allowedOrigins` está configurado, se agrega el header `Access-Control-Allow-Origin` para los orígenes coincidentes. Las peticiones OPTIONS preflight retornan 204.
+CORS is automatic on the health endpoint. If `allowedOrigins` is configured, the `Access-Control-Allow-Origin` header is added for matching origins. OPTIONS preflight requests return 204.
 
 ---
 
 ## Middleware
 
-El sistema de middleware permite validar conexiones antes de que un cliente sea aceptado:
+The middleware system allows validating connections before a client is accepted:
 
 ```javascript
-// Autenticación con token
+// Token authentication
 stelar.use((ctx, next) => {
   const token = ctx.req?.headers?.authorization;
   if (!token) {
-    return ctx.ack('error', { message: 'Token requerido' });
+    return ctx.ack('error', { message: 'Token required' });
   }
-  // Validar token...
+  // Validate token...
   ctx.setMetadata('userId', getUserIdFromToken(token));
   next();
 });
 
-// Rate limiting custom
+// Custom rate limiting
 stelar.use((ctx, next) => {
   const ip = ctx.req?.headers?.['x-forwarded-for'] || ctx.socket.remoteAddress;
   if (isBlocked(ip)) {
@@ -639,21 +639,21 @@ stelar.use((ctx, next) => {
 
 // Logging
 stelar.use((ctx, next) => {
-  console.log(`Nueva conexión desde ${ctx.clientInfo.remoteAddress}`);
+  console.log(`New connection from ${ctx.clientInfo.remoteAddress}`);
   next();
 });
 ```
 
-Múltiples middlewares se ejecutan en orden. Si un middleware no llama a `next()`, la conexión se rechaza.
+Multiple middlewares execute in order. If a middleware doesn't call `next()`, the connection is rejected.
 
 ---
 
 ## Rooms
 
-Los rooms son canales de comunicación. Un cliente puede estar en múltiples rooms simultáneamente:
+Rooms are communication channels. A client can be in multiple rooms simultaneously:
 
 ```javascript
-// Servidor
+// Server
 stelar.on('joinChannel', (ctx) => {
   ctx.joinRoom(ctx.data.channel);
   ctx.to(ctx.data.channel, 'userJoined', { userId: ctx.id });
@@ -666,71 +666,71 @@ stelar.on('channelMessage', (ctx) => {
   }
 });
 
-// Cliente
+// Client
 client.joinRoom('general');
 client.joinRoom('random');
 client.joinRoom('project-alpha');
 ```
 
-Los rooms se limpian automáticamente cuando el último cliente sale o se desconecta. No hay que liberar recursos manualmente.
+Rooms are automatically cleaned up when the last client leaves or disconnects. No manual resource release needed.
 
 ---
 
 ## ACK (Request-Response)
 
-El sistema de ACK permite comunicación request-response confiable sobre el protocolo en tiempo real:
+The ACK system enables reliable request-response communication over the real-time protocol:
 
 ```javascript
-// Servidor — Registrar handler ACK
+// Server — Register ACK handler
 stelar.onAck('getUsers', (ctx) => {
-  return { users: ['Juan', 'Maria', 'Pedro'] };
+  return { users: ['John', 'Mary', 'Peter'] };
 });
 
 stelar.onAck('validateToken', (ctx) => {
   const valid = validateToken(ctx.data.token);
-  if (!valid) throw new Error('Token inválido');
+  if (!valid) throw new Error('Invalid token');
   return { userId: 123 };
 });
 
-// Cliente — Enviar petición y esperar respuesta
+// Client — Send request and wait for response
 const users = await client.request('getUsers', {}, 'getUsers');
-console.log(users); // { users: ['Juan', 'Maria', 'Pedro'] }
+console.log(users); // { users: ['John', 'Mary', 'Peter'] }
 
 try {
   const result = await client.request('validateToken', { token: 'abc' }, 'validateToken');
 } catch (err) {
-  console.log('Token inválido');
+  console.log('Invalid token');
 }
 ```
 
-Las peticiones ACK tienen timeout configurable (`ackTimeout`). Si el servidor no responde en ese tiempo, la Promise se rechaza.
+ACK requests have configurable timeout (`ackTimeout`). If the server doesn't respond within that time, the Promise is rejected.
 
 ---
 
-## Datos Binarios
+## Binary Data
 
-Enviar archivos, imágenes, audio, o cualquier dato binario sin overhead de base64:
+Send files, images, audio, or any binary data without base64 overhead:
 
 ```javascript
-// Servidor — Recibir y reenviar binario
+// Server — Receive and forward binary
 stelar.on('file', (ctx) => {
-  ctx.broadcastBinary('file', ctx.data); // ctx.data es un Buffer
+  ctx.broadcastBinary('file', ctx.data); // ctx.data is a Buffer
 });
 
-// Cliente — Enviar binario
+// Client — Send binary
 const imageBuffer = await fs.readFile('photo.png');
 client.emitBinary('file', imageBuffer);
 
-// Cliente — Recibir binario
+// Client — Receive binary
 client.on('file', (buffer) => {
-  console.log('Archivo recibido:', buffer.length, 'bytes');
+  console.log('File received:', buffer.length, 'bytes');
   fs.writeFile('received.png', buffer);
 });
 ```
 
 ---
 
-## Métricas del Servidor
+## Server Metrics
 
 ```javascript
 const stats = stelar.getStats();
@@ -754,23 +754,23 @@ console.log(stats);
 
 ---
 
-## Métricas del Cliente
+## Client Metrics
 
 ```javascript
-console.log('Mensajes enviados:', client.getMessagesSent());
-console.log('Mensajes recibidos:', client.getMessagesReceived());
-console.log('Hora de conexión:', client.getConnectTime());
-console.log('Último error:', client.getLastError());
-console.log('Mensajes en cola:', client.getQueueSize());
-console.log('Estado:', client.getState());
-console.log('Conectado?', client.isConnected());
+console.log('Messages sent:', client.getMessagesSent());
+console.log('Messages received:', client.getMessagesReceived());
+console.log('Connection time:', client.getConnectTime());
+console.log('Last error:', client.getLastError());
+console.log('Messages in queue:', client.getQueueSize());
+console.log('State:', client.getState());
+console.log('Connected?', client.isConnected());
 ```
 
 ---
 
-## Escalabilidad Horizontal
+## Horizontal Scalability
 
-stelar-time-real funciona en un solo servidor por instancia. Para escalar a múltiples instancias, usa Redis Pub/Sub como puente:
+stelar-time-real runs on a single server per instance. To scale to multiple instances, use Redis Pub/Sub as a bridge:
 
 ```javascript
 import { StelarServer } from 'stelar-time-real';
@@ -779,7 +779,7 @@ import Redis from 'redis';
 const redis = Redis.createClient();
 const stelar = new StelarServer({ port: 3000, tcpPort: 3001 });
 
-// Cuando un broadcast se hace en esta instancia, publicar en Redis
+// When a broadcast happens on this instance, publish to Redis
 stelar.onAll((ctx) => {
   redis.publish('stelar:events', JSON.stringify({
     event: ctx.eventName,
@@ -788,7 +788,7 @@ stelar.onAll((ctx) => {
   }));
 });
 
-// Cuando otra instancia publica, emitir localmente
+// When another instance publishes, emit locally
 redis.subscribe('stelar:events', (message) => {
   const { event, data, excludeId } = JSON.parse(message);
   stelar.broadcast(event, data, excludeId);
@@ -799,31 +799,31 @@ redis.subscribe('stelar:events', (message) => {
 
 ## Performance
 
-Mediciones con stress test (50 WebSocket + 20 TCP clientes):
+Measurements with stress test (50 WebSocket + 20 TCP clients):
 
-| Métrica | Valor |
+| Metric | Value |
 |---------|-------|
-| Conexiones simultáneas | 70 |
-| RAM por cliente | ~58 KB |
+| Simultaneous connections | 70 |
+| RAM per client | ~58 KB |
 | Throughput | 3,425 msg/sec |
-| Heap estable | ~10 MB |
-| Memory leaks | No detectados |
+| Stable heap | ~10 MB |
+| Memory leaks | None detected |
 | MaxListeners warnings | 0 |
 
-La librería usa ~58KB por cliente conectado. Un servidor con 1GB de RAM puede manejar aproximadamente 17,000 conexiones simultáneas.
+The library uses ~58KB per connected client. A server with 1GB of RAM can handle approximately 17,000 simultaneous connections.
 
 ---
 
-## Estructura del Proyecto
+## Project Structure
 
 ```
 stelar-time-real/
 ├── src/
-│   ├── index.ts        # Servidor (StelarServer, RateLimiter, IPConnectionTracker)
-│   ├── client.ts       # Cliente (StelarClient, MessageQueue)
-│   ├── protocol.ts     # Protocolo binario TCP (encode/decode, FrameParser)
-│   ├── websocket.ts    # WebSocket manual RFC 6455 (WSFrameParser, framing)
-│   └── logger.ts       # Logger con niveles
+│   ├── index.ts        # Server (StelarServer, RateLimiter, IPConnectionTracker)
+│   ├── client.ts       # Client (StelarClient, MessageQueue)
+│   ├── protocol.ts     # Binary TCP protocol (encode/decode, FrameParser)
+│   ├── websocket.ts    # Manual WebSocket RFC 6455 (WSFrameParser, framing)
+│   └── logger.ts       # Logger with levels
 ├── package.json
 ├── tsconfig.json
 └── README.md
@@ -833,7 +833,7 @@ stelar-time-real/
 
 ## TypeScript
 
-stelar-time-real está escrita en TypeScript e incluye definiciones de tipos (.d.ts). No necesitas instalar @types separados:
+stelar-time-real is written in TypeScript and includes type definitions (.d.ts). You don't need to install separate @types:
 
 ```typescript
 import { StelarServer, StelarClient, StelarStats } from 'stelar-time-real';
@@ -847,31 +847,31 @@ const stats: StelarStats = server.getStats();
 ## Tests
 
 ```bash
-# Tests de producción (54 assertions, 16 suites)
+# Production tests (54 assertions, 16 suites)
 node test-production.mjs
 
-# Stress test (70 clientes, throughput, memoria)
+# Stress test (70 clients, throughput, memory)
 node test-stress.mjs
 ```
 
-Cobertura: server start/stop, health check, CORS, WS connect/emit/broadcast, TCP connect/emit/reply, rooms, ACK, max connections, rate limiting, server stats, max rooms, O(1) lookup, client metrics, binary data, origin checking, middleware.
+Coverage: server start/stop, health check, CORS, WS connect/emit/broadcast, TCP connect/emit/reply, rooms, ACK, max connections, rate limiting, server stats, max rooms, O(1) lookup, client metrics, binary data, origin checking, middleware.
 
 ---
 
-## Configuracion Extensible
+## Extensible Configuration
 
-stelar-time-real v3.2 te da control total sobre cada aspecto del servidor y el cliente. Puedes reemplazar componentes enteros, agregar hooks para personalizar el comportamiento, y cambiar la configuración en runtime.
+stelar-time-real v3.2 gives you total control over every aspect of the server and client. You can replace entire components, add hooks to customize behavior, and change configuration at runtime.
 
 ### Custom Rate Limiter
 
-Reemplaza el rate limiter built-in (token bucket) con tu propia implementación. Ideal para usar Redis, MongoDB, o cualquier otro store:
+Replace the built-in rate limiter (token bucket) with your own implementation. Ideal for using Redis, MongoDB, or any other store:
 
 ```javascript
 import { StelarServer, IRateLimiter } from 'stelar-time-real';
 
-// Tu propio rate limiter con Redis
+// Your own rate limiter with Redis
 class RedisRateLimiter implements IRateLimiter {
-  private redis; // tu conexión Redis
+  private redis; // your Redis connection
 
   constructor(redisClient) {
     this.redis = redisClient;
@@ -881,9 +881,9 @@ class RedisRateLimiter implements IRateLimiter {
     const key = `ratelimit:${id}`;
     const current = await this.redis.incr(key);
     if (current === 1) {
-      await this.redis.expire(key, 1); // 1 segundo ventana
+      await this.redis.expire(key, 1); // 1 second window
     }
-    return current <= 100; // 100 por segundo
+    return current <= 100; // 100 per second
   }
 
   async reset(id) {
@@ -891,11 +891,11 @@ class RedisRateLimiter implements IRateLimiter {
   }
 
   async cleanup() {
-    // Redis maneja la expiración automáticamente
+    // Redis handles expiration automatically
   }
 
   async size() {
-    return 0; // No aplicable con Redis
+    return 0; // Not applicable with Redis
   }
 }
 
@@ -907,7 +907,7 @@ const stelar = new StelarServer({
 
 ### Custom IP Tracker
 
-Reemplaza el per-IP connection tracker con tu propia lógica. Útil para usar una base de datos de IPs bloqueadas o lógica de whitelist:
+Replace the per-IP connection tracker with your own logic. Useful for using a database of blocked IPs or whitelist logic:
 
 ```javascript
 class CustomIPTracker implements IIPTracker {
@@ -916,15 +916,15 @@ class CustomIPTracker implements IIPTracker {
   private counts = new Map<string, number>();
 
   check(ip) {
-    if (this.blockedIPs.has(ip)) return false; // IP bloqueada
-    if (this.vipIPs.has(ip)) return true; // VIP sin límite
-    return (this.counts.get(ip) || 0) < 20; // 20 para normales
+    if (this.blockedIPs.has(ip)) return false; // Blocked IP
+    if (this.vipIPs.has(ip)) return true; // VIP no limit
+    return (this.counts.get(ip) || 0) < 20; // 20 for normal
   }
 
   add(ip) { this.counts.set(ip, (this.counts.get(ip) || 0) + 1); }
   remove(ip) { /* ... */ }
   getCount(ip) { return this.counts.get(ip) || 0; }
-  cleanup() { /* limpiar entradas expiradas */ }
+  cleanup() { /* clean expired entries */ }
 }
 
 const stelar = new StelarServer({
@@ -935,7 +935,7 @@ const stelar = new StelarServer({
 
 ### Custom Client ID Generator
 
-Genera IDs de cliente con tu propio formato. Por defecto usa UUID v4:
+Generate client IDs with your own format. By default uses UUID v4:
 
 ```javascript
 const stelar = new StelarServer({
@@ -948,7 +948,7 @@ const stelar = new StelarServer({
 
 ### Event-Specific Rate Limits
 
-Cada evento puede tener su propio rate limit, independiente del global:
+Each event can have its own rate limit, independent from the global one:
 
 ```javascript
 const stelar = new StelarServer({
@@ -956,112 +956,112 @@ const stelar = new StelarServer({
   rateLimit: { maxPoints: 100, windowMs: 1000 }, // Global: 100 msg/sec
   eventRateLimits: {
     'chat': { maxPoints: 5, windowMs: 1000 },        // Chat: 5 msg/sec
-    'file-upload': { maxPoints: 2, windowMs: 10000 }, // Archivos: 2 cada 10s
+    'file-upload': { maxPoints: 2, windowMs: 10000 }, // Files: 2 every 10s
     'typing': { maxPoints: 10, windowMs: 1000 },      // Typing: 10 msg/sec
-    'location': { maxPoints: 1, windowMs: 5000 },     // Ubicación: 1 cada 5s
+    'location': { maxPoints: 1, windowMs: 5000 },     // Location: 1 every 5s
   },
 });
 
-// También puedes agregar/remover en runtime:
+// You can also add/remove at runtime:
 stelar.setEventRateLimit('voice', { maxPoints: 50, windowMs: 1000 });
 stelar.removeEventRateLimit('voice');
 ```
 
 ### Per-Client Rate Limits
 
-Dale a clientes específicos rate limits diferentes. Útil para usuarios premium vs gratuitos:
+Give specific clients different rate limits. Useful for premium vs free users:
 
 ```javascript
 stelar.onConnection((ctx) => {
   const role = ctx.getMetadata('role');
 
-  // Usuario premium: 500 msg/sec
+  // Premium user: 500 msg/sec
   if (role === 'premium') {
     stelar.setClientRateLimit(ctx.id, { maxPoints: 500, windowMs: 1000 });
   }
-  // Usuario bot verificado: 1000 msg/sec
+  // Verified bot: 1000 msg/sec
   else if (role === 'bot') {
     stelar.setClientRateLimit(ctx.id, { maxPoints: 1000, windowMs: 1000 });
   }
-  // Usuario normal: usa el rate limit global (100 msg/sec)
+  // Normal user: uses global rate limit (100 msg/sec)
 });
 
-// Remover override (vuelve al global):
+// Remove override (reverts to global):
 stelar.removeClientRateLimit(clientId);
 ```
 
-La prioridad de rate limiting es: **per-client override > event-specific > global > custom rate limiter**.
+Rate limiting priority is: **per-client override > event-specific > global > custom rate limiter**.
 
-### Hook System (Servidor)
+### Hook System (Server)
 
-Hooks te permiten personalizar lo que pasa cuando el servidor detecta un evento. Cada hook puede retornar `false` para cancelar la acción por defecto:
+Hooks let you customize what happens when the server detects an event. Each hook can return `false` to cancel the default action:
 
 ```javascript
 const stelar = new StelarServer({
   port: 3000,
   hooks: {
-    // Cuando un cliente excede el rate limit
-    // Return false para NO desconectar (ej: solo warn)
+    // When a client exceeds the rate limit
+    // Return false to NOT disconnect (e.g.: just warn)
     onRateLimitExceeded: ({ clientId, event, protocol }) => {
-      console.warn(`Rate limit: ${clientId} en evento ${event}`);
-      // return false; // Descomenta para NO desconectar al cliente
+      console.warn(`Rate limit: ${clientId} on event ${event}`);
+      // return false; // Uncomment to NOT disconnect the client
     },
 
-    // Cuando se alcanza el máximo de conexiones
+    // When maximum connections is reached
     onMaxConnectionsReached: ({ activeConnections, max, ip }) => {
-      console.error(`Servidor lleno: ${activeConnections}/${max} desde ${ip}`);
-      // Enviar alerta a Slack, etc.
+      console.error(`Server full: ${activeConnections}/${max} from ${ip}`);
+      // Send alert to Slack, etc.
     },
 
-    // Cuando un cliente intenta unirse a un room
-    // Return false para RECHAZAR el join
+    // When a client tries to join a room
+    // Return false to REJECT the join
     onClientJoinRoom: ({ clientId, room, metadata }) => {
       const role = metadata.get('role');
       if (room.startsWith('admin-') && role !== 'admin') {
-        return false; // Rechazar: solo admins
+        return false; // Reject: admins only
       }
     },
 
-    // Cuando un cliente sale de un room
-    // Return false para RECHAZAR el leave
+    // When a client leaves a room
+    // Return false to REJECT the leave
     onClientLeaveRoom: ({ clientId, room }) => {
-      // Lógica custom...
+      // Custom logic...
     },
 
-    // Cuando se alcanza el máximo de rooms global
+    // When global maximum rooms is reached
     onMaxRoomsReached: ({ clientId, room, totalRooms, max }) => {
       console.warn(`Max rooms: ${totalRooms}/${max}`);
     },
 
-    // Cuando un cliente excede rooms por cliente
+    // When a client exceeds rooms per client
     onMaxRoomsPerClientReached: ({ clientId, room, currentRooms, max }) => {
-      console.warn(`Cliente ${clientId}: ${currentRooms}/${max} rooms`);
+      console.warn(`Client ${clientId}: ${currentRooms}/${max} rooms`);
     },
 
-    // Cuando un payload es demasiado grande
+    // When a payload is too large
     onPayloadTooLarge: ({ clientId, event, size, max }) => {
-      console.warn(`Payload grande: ${size} bytes de ${clientId}`);
+      console.warn(`Large payload: ${size} bytes from ${clientId}`);
     },
 
-    // Cuando se recibe un mensaje inválido
+    // When an invalid message is received
     onInvalidMessage: ({ clientId, reason, protocol }) => {
-      console.warn(`Mensaje inválido de ${clientId}: ${reason}`);
+      console.warn(`Invalid message from ${clientId}: ${reason}`);
     },
 
-    // Antes de un broadcast
-    // Return false para CANCELAR el broadcast
+    // Before a broadcast
+    // Return false to CANCEL the broadcast
     onBeforeBroadcast: ({ event, data, excludeId }) => {
-      if (event === 'spam') return false; // Cancelar broadcast de spam
+      if (event === 'spam') return false; // Cancel spam broadcast
     },
 
-    // Cuando un cliente se conecta
+    // When a client connects
     onClientConnect: ({ clientId, ip, protocol, metadata }) => {
-      console.log(`Conectado: ${clientId} via ${protocol} desde ${ip}`);
+      console.log(`Connected: ${clientId} via ${protocol} from ${ip}`);
     },
 
-    // Cuando un cliente se desconecta
+    // When a client disconnects
     onClientDisconnect: ({ clientId, ip, protocol, rooms }) => {
-      console.log(`Desconectado: ${clientId} estaba en ${rooms.size} rooms`);
+      console.log(`Disconnected: ${clientId} was in ${rooms.size} rooms`);
     },
   },
 });
@@ -1069,13 +1069,13 @@ const stelar = new StelarServer({
 
 ### Custom Health Check
 
-Reemplaza el health check built-in con tu propio handler. Útil para agregar checks de base de datos, disk space, etc:
+Replace the built-in health check with your own handler. Useful for adding database checks, disk space, etc:
 
 ```javascript
 const stelar = new StelarServer({
   port: 3000,
   customHealthHandler: (req, res, stats) => {
-    // stats contiene todas las estadísticas del servidor
+    // stats contains all server statistics
 
     const dbConnected = await checkDatabase();
     const diskSpace = checkDiskSpace();
@@ -1096,13 +1096,13 @@ const stelar = new StelarServer({
 
 ### Runtime Configuration
 
-Cambia la configuración del servidor sin reiniciar:
+Change server configuration without restarting:
 
 ```javascript
 const stelar = new StelarServer({ port: 3000, maxConnections: 100 });
 await stelar.start();
 
-// Más tarde... necesitas más capacidad
+// Later... you need more capacity
 stelar.updateConfig({
   maxConnections: 500,
   maxRooms: 5000,
@@ -1110,17 +1110,17 @@ stelar.updateConfig({
   allowedOrigins: ['https://app.com', 'https://admin.app.com'],
 });
 
-// Cambiar hooks en runtime
+// Change hooks at runtime
 stelar.updateConfig({
   hooks: {
     onRateLimitExceeded: ({ clientId }) => {
-      banUser(clientId); // Ban automático en vez de desconectar
-      return false; // No desconectar, ya lo baneaste
+      banUser(clientId); // Auto-ban instead of disconnecting
+      return false; // Don't disconnect, you already banned them
     },
   },
 });
 
-// Ver configuración actual
+// View current configuration
 const config = stelar.getConfig();
 console.log(config);
 // {
@@ -1135,49 +1135,49 @@ console.log(config);
 
 ### Client Hooks
 
-Personaliza el comportamiento del cliente con hooks:
+Customize client behavior with hooks:
 
 ```javascript
 const client = new StelarClient('localhost:3000', {
   hooks: {
-    // Antes de enviar un mensaje — return false para cancelar
+    // Before sending a message — return false to cancel
     onBeforeEmit: ({ event, data }) => {
-      if (event === 'debug') return false; // No enviar debug en producción
-      console.log(`Enviando: ${event}`);
+      if (event === 'debug') return false; // Don't send debug in production
+      console.log(`Sending: ${event}`);
     },
 
-    // Cuando se recibe cualquier mensaje
+    // When any message is received
     onMessage: ({ event, data, isBinary }) => {
       metrics.increment('messages.received');
       if (isBinary) metrics.increment('binary.received');
     },
 
-    // Cuando cambia el estado de conexión
+    // When connection state changes
     onStateChange: ({ from, to }) => {
-      console.log(`Estado: ${from} -> ${to}`);
+      console.log(`State: ${from} -> ${to}`);
       if (to === 'reconnecting') showReconnectingUI();
       if (to === 'connected') hideReconnectingUI();
     },
 
-    // Personalizar el delay de reconexión
+    // Customize reconnection delay
     onReconnectDelay: ({ attempt, defaultDelay }) => {
-      // Horario laboral: reconexión rápida
+      // Business hours: fast reconnection
       const hour = new Date().getHours();
       if (hour >= 9 && hour <= 18) return 500;
-      return defaultDelay; // Fuera de horario: delay normal
+      return defaultDelay; // Off-hours: normal delay
     },
 
-    // Cuando un mensaje se encola (desconectado)
+    // When a message is queued (disconnected)
     onMessageQueued: ({ event, queueSize }) => {
-      console.log(`Mensaje encolado: ${event} (cola: ${queueSize})`);
+      console.log(`Message queued: ${event} (queue: ${queueSize})`);
     },
 
-    // Cuando se drena la cola después de reconectar
+    // When queue is drained after reconnecting
     onQueueDrained: ({ count }) => {
-      console.log(`${count} mensajes enviados después de reconectar`);
+      console.log(`${count} messages sent after reconnecting`);
     },
 
-    // Cuando ocurre un error
+    // When an error occurs
     onError: ({ error, context }) => {
       errorReporter.report(error, { context });
     },
@@ -1187,24 +1187,24 @@ const client = new StelarClient('localhost:3000', {
 
 ### Custom Reconnect Delay
 
-Controla exactamente cuánto esperar antes de cada reintento de reconexión:
+Control exactly how long to wait before each reconnection attempt:
 
 ```javascript
-// Opción 1: Función custom
+// Option 1: Custom function
 const client = new StelarClient('localhost:3000', {
   customReconnectDelay: (attempt, baseDelay, maxDelay) => {
-    // Retry rápido los primeros 3 intentos, luego lento
+    // Fast retry for first 3 attempts, then slow
     if (attempt <= 3) return 200;
     if (attempt <= 10) return 2000;
-    return 30000; // 30s para intentos posteriores
+    return 30000; // 30s for later attempts
   },
 });
 
-// Opción 2: Via hook (puedes cambiar en runtime)
+// Option 2: Via hook (can change at runtime)
 const client = new StelarClient('localhost:3000', {
   hooks: {
     onReconnectDelay: ({ attempt, defaultDelay }) => {
-      return Math.min(100 * attempt, 10000); // Lineal en vez de exponencial
+      return Math.min(100 * attempt, 10000); // Linear instead of exponential
     },
   },
 });
@@ -1212,25 +1212,25 @@ const client = new StelarClient('localhost:3000', {
 
 ### Client Runtime Configuration
 
-Cambia la configuración del cliente sin reconectar:
+Change client configuration without reconnecting:
 
 ```javascript
 const client = new StelarClient('localhost:3000');
 client.connect();
 
-// Más tarde... necesitas ajustar timeouts
+// Later... adjust timeouts
 client.updateOptions({
   heartbeatInterval: 15000,
   ackTimeout: 10000,
   maxPayloadSize: 50 * 1024 * 1024, // 50MB
   hooks: {
     onBeforeEmit: ({ event }) => {
-      if (event === 'log') return false; // Ya no enviar logs
+      if (event === 'log') return false; // No longer send logs
     },
   },
 });
 
-// Ver configuración actual
+// View current configuration
 const opts = client.getOptions();
 console.log(opts);
 ```
